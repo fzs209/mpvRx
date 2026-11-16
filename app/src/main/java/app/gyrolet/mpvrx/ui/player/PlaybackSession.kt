@@ -154,6 +154,8 @@ object PlaybackSession : MPVLib.EventObserver {
   internal val hrtfStatus: StateFlow<HrtfStatus> = _hrtfStatus.asStateFlow()
   private val nativeEvents = CoroutineScope(SupervisorJob() + Dispatchers.Default.limitedParallelism(1))
   private var nativeObserver: NativeEventObserver? = null
+  /** Captured after mpv.conf is parsed, so turning diagnostics off restores the user's config. */
+  private var configuredMsgLevel: String? = null
 
   private class NativeEventObserver : MPVLib.EventObserver, MPVLib.LogObserver {
     @Volatile private var fileGeneration: Long? = null
@@ -589,6 +591,7 @@ internal fun userScriptsNeedReload(currentKey: String): Boolean {
         failedAutoEqGeneration = null
         _autoEqUnavailable.value = false
         nativeCoreReady = false
+        configuredMsgLevel = null
         observedProperties.clear()
         suspendedVideoTrack = null
         rendererOutputReady = false
@@ -1776,10 +1779,16 @@ internal fun userScriptsNeedReload(currentKey: String): Boolean {
     enabled: Boolean,
     source: String,
   ): Boolean {
-    val requestedLevel = if (enabled) "all=v" else "all=warn"
     val applied =
       withReadyCore(false) {
         runCatching {
+          val currentLevel = MPVLib.getPropertyString("msg-level")
+          if (configuredMsgLevel == null) {
+            configuredMsgLevel = currentLevel ?: "all=warn"
+          }
+          // Preserve mpv.conf's configured level when diagnostics are disabled. Verbose Logging
+          // deliberately overrides it while enabled, then restores the captured value on disable.
+          val requestedLevel = if (enabled) "all=v" else configuredMsgLevel ?: "all=warn"
           MPVLib.setPropertyString("msg-level", requestedLevel)
           MPVLib.command("request_log_messages", "terminal-default")
           val effectiveLevel = MPVLib.getPropertyString("msg-level")
@@ -1795,7 +1804,7 @@ internal fun userScriptsNeedReload(currentKey: String): Boolean {
           )
           matches
         }.getOrElse { error ->
-          Log.e(LOG_DIAGNOSTICS_TAG, "Failed to apply msg-level=$requestedLevel from $source", error)
+          Log.e(LOG_DIAGNOSTICS_TAG, "Failed to apply msg-level for verboseLogging=$enabled from $source", error)
           false
         }
       }
