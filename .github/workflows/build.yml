@@ -27,7 +27,7 @@ jobs:
             name: Standard
             gradle: Standard
             dir: standard
-            abis: universal arm64-v8a armeabi-v7a x86 x86_64
+            abis: arm64-v8a
             package: apk
           - id: fongmi
             name: FongMi
@@ -59,6 +59,7 @@ jobs:
       GRADLE_FLAVOR: ${{ matrix.distribution.gradle }}
       APK_DIR: ${{ matrix.distribution.dir }}
       APK_ABIS: ${{ matrix.distribution.abis }}
+      TARGET_ABI: arm64-v8a
 
     steps:
       - name: Checkout repository
@@ -96,14 +97,14 @@ jobs:
           if [[ "$DISTRIBUTION" != "playstore" ]]; then
             extra_args+=(-PexperimentalBuild=true)
           fi
-          ./gradlew "assemble${GRADLE_FLAVOR}Release" "${extra_args[@]}" --stacktrace --no-daemon --max-workers=2
+          ./gradlew "assemble${GRADLE_FLAVOR}Release" -PtargetAbi="$TARGET_ABI" "${extra_args[@]}" --stacktrace --no-daemon --max-workers=2
 
       - name: Build release bundle
         if: ${{ matrix.distribution.package == 'aab' }}
         shell: bash
         run: |
           set -euo pipefail
-          ./gradlew "bundle${GRADLE_FLAVOR}Release" --stacktrace --no-daemon --max-workers=2
+          ./gradlew "bundle${GRADLE_FLAVOR}Release" -PtargetAbi="$TARGET_ABI" --stacktrace --no-daemon --max-workers=2
 
       - name: Sign bundle when signing secrets are available
         if: ${{ matrix.distribution.package == 'aab' }}
@@ -214,7 +215,7 @@ jobs:
           case "$DISTRIBUTION" in
             standard)
               release_dir="app/build/outputs/apk/standard/release"
-              architectures=(universal arm64-v8a armeabi-v7a x86 x86_64)
+              architectures=(arm64-v8a)
               for abi in "${architectures[@]}"; do
                 if ! compgen -G "$release_dir/app-standard-${abi}-release*.apk" >/dev/null; then
                   echo "No standard release APK found for $abi"
@@ -266,46 +267,6 @@ jobs:
         with:
           name: app-standard-arm64-v8a-release-${{ steps.metadata.outputs.short_sha }}
           path: app/build/outputs/apk/standard/release/app-standard-arm64-v8a-release*.apk
-          if-no-files-found: error
-          retention-days: 14
-          compression-level: 0
-
-      - name: Upload armeabi-v7a APK
-        if: ${{ matrix.distribution.id == 'standard' }}
-        uses: actions/upload-artifact@v7
-        with:
-          name: app-standard-armeabi-v7a-release-${{ steps.metadata.outputs.short_sha }}
-          path: app/build/outputs/apk/standard/release/app-standard-armeabi-v7a-release*.apk
-          if-no-files-found: error
-          retention-days: 14
-          compression-level: 0
-
-      - name: Upload universal APK
-        if: ${{ matrix.distribution.id == 'standard' }}
-        uses: actions/upload-artifact@v7
-        with:
-          name: app-standard-universal-release-${{ steps.metadata.outputs.short_sha }}
-          path: app/build/outputs/apk/standard/release/app-standard-universal-release*.apk
-          if-no-files-found: error
-          retention-days: 14
-          compression-level: 0
-
-      - name: Upload x86 APK
-        if: ${{ matrix.distribution.id == 'standard' }}
-        uses: actions/upload-artifact@v7
-        with:
-          name: app-standard-x86-release-${{ steps.metadata.outputs.short_sha }}
-          path: app/build/outputs/apk/standard/release/app-standard-x86-release*.apk
-          if-no-files-found: error
-          retention-days: 14
-          compression-level: 0
-
-      - name: Upload x86_64 APK
-        if: ${{ matrix.distribution.id == 'standard' }}
-        uses: actions/upload-artifact@v7
-        with:
-          name: app-standard-x86_64-release-${{ steps.metadata.outputs.short_sha }}
-          path: app/build/outputs/apk/standard/release/app-standard-x86_64-release*.apk
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
@@ -445,11 +406,7 @@ jobs:
           touch site/.nojekyll
 
           declare -A sources=(
-            [universal]=app-standard-universal-release.apk
             [arm64-v8a]=app-standard-arm64-v8a-release.apk
-            [armeabi-v7a]=app-standard-armeabi-v7a-release.apk
-            [x86]=app-standard-x86-release.apk
-            [x86_64]=app-standard-x86_64-release.apk
             [fongmi]=app-fongmi-universal-release.apk
             [no-vulkan]=app-noVulkan-universal-release.apk
           )
