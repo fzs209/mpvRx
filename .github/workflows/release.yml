@@ -109,21 +109,21 @@ jobs:
             name: FongMi
             gradle: Fongmi
             dir: fongmi
-            abis: universal
+            abis: arm64-v8a
             asset: fongmi
             package: apk
           - id: no_vulkan
             name: No Vulkan
             gradle: NoVulkan
             dir: noVulkan
-            abis: universal
+            abis: arm64-v8a
             asset: no-vulkan
             package: apk
           - id: playstore
             name: Play Store
             gradle: Playstore
             dir: playstore
-            abis: universal
+            abis: arm64-v8a
             asset: playstore
             package: apk
           - id: playstore_bundle
