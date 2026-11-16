@@ -1790,7 +1790,8 @@ internal fun userScriptsNeedReload(currentKey: String): Boolean {
           // deliberately overrides it while enabled, then restores the captured value on disable.
           val requestedLevel = if (enabled) "all=v" else configuredMsgLevel ?: "all=warn"
           MPVLib.setPropertyString("msg-level", requestedLevel)
-          MPVLib.command("request_log_messages", "terminal-default")
+          // mpvlibAndroid requests "terminal-default" directly through mpv_request_log_messages()
+          // during MPVLib.create(); updating msg-level is sufficient to change that live threshold.
           val effectiveLevel = MPVLib.getPropertyString("msg-level")
           val callbacks = nativeObserver?.receivedLogMessageCount() ?: 0L
           val observerRegistered = nativeObserver != null
@@ -1799,7 +1800,7 @@ internal fun userScriptsNeedReload(currentKey: String): Boolean {
             LOG_DIAGNOSTICS_TAG,
             "source=$source verboseLogging=$enabled requestedMsgLevel=$requestedLevel " +
               "effectiveMsgLevel=${effectiveLevel ?: "<unavailable>"} " +
-              "requestLogMessages=terminal-default observerRegistered=$observerRegistered " +
+              "nativeLogRequest=terminal-default observerRegistered=$observerRegistered " +
               "logCallbacks=$callbacks applied=$matches",
           )
           matches
