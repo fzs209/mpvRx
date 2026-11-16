@@ -113,6 +113,11 @@ android {
     buildConfigField("String", "GIT_SHA", "\"${getCommitSha()}\"")
     buildConfigField("int", "GIT_COUNT", getCommitCount())
 
+    // Restrict both native compilation and packaged JNI dependencies to the requested ABI set.
+    ndk {
+      abiFilters += activeAbis
+    }
+
     externalNativeBuild {
       cmake {
         abiFilters += activeAbis
@@ -243,7 +248,7 @@ android {
       isEnable = !isBundleBuild
       reset()
       include(*activeAbis.toTypedArray())
-      isUniversalApk = activeAbis.size > 1
+      isUniversalApk = true
     }
   }
 
@@ -353,7 +358,12 @@ androidComponents {
           .find { it.filterType == FilterConfiguration.FilterType.ABI }
           ?.identifier
 
-      if (isUniversalOnly && activeAbis.size > 1 && abi != null) {
+      // Flavors published as a single APK use the splitless output, while Standard
+      // publishes only the explicit ARM64 split. Keep one main output in either case.
+      if (isUniversalOnly && abi != null) {
+        output.enabled.set(false)
+      }
+      if (!isUniversalOnly && abi == null && !isBundleBuild) {
         output.enabled.set(false)
       }
 
