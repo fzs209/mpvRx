@@ -621,6 +621,13 @@ class MPVView(
   }
 
   private fun postInitOptions() {
+    // mpv.conf is parsed by MPVLib.init() after initOptions(). Reapply the app-owned logging
+    // preference here so a user config cannot silently disable Verbose Logging.
+    PlaybackSession.applyVerboseLogging(
+      enabled = advancedPreferences.verboseLogging.get(),
+      source = "post-init",
+    )
+
     // Native initialization can run off the main thread. Start with a safe baseline and let the
     // Activity's WindowInsets listener apply the real cutout margins when the view is attached.
     PlaybackSession.setOptionString("osd-margin-x", DEFAULT_OSD_SAFE_MARGIN.toString())
