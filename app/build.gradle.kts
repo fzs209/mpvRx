@@ -96,7 +96,8 @@ android {
   defaultConfig {
     manifestPlaceholders["measureApiKey"] = measureApiKey
     buildConfigField("boolean", "MEASURE_CONFIGURED", measureApiKey.isNotBlank().toString())
-    applicationId = "app.gyrolet.mpvrx"
+    // A fork-specific ID keeps this build installable alongside upstream mpvRx.
+    applicationId = "com.fzs209.mpvrx"
     minSdk = 26
     targetSdk = 36
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -150,8 +151,8 @@ android {
 
     create("playstore") {
       dimension = "distribution"
-      // Google Play listing package; sideload builds keep app.gyrolet.mpvrx.
-      applicationId = "com.gyrolet.mpvrx"
+      // Keep every distribution of this fork on the same fork-specific application ID.
+      applicationId = "com.fzs209.mpvrx"
       buildConfigField("boolean", "IS_PLAY_STORE_BUILD", "true")
       buildConfigField("boolean", "ENABLE_UPDATE_FEATURE", "false")
       buildConfigField("String", "UPDATE_APK_VARIANT", "\"standard\"")

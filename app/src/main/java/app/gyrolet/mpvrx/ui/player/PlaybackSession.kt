@@ -154,8 +154,30 @@ object PlaybackSession : MPVLib.EventObserver {
   private val nativeEvents = CoroutineScope(SupervisorJob() + Dispatchers.Default.limitedParallelism(1))
   private var nativeObserver: NativeEventObserver? = null
 
-  private class NativeEventObserver : MPVLib.EventObserver {
+  private class NativeEventObserver : MPVLib.EventObserver, MPVLib.LogObserver {
     @Volatile private var fileGeneration: Long? = null
+
+    /**
+     * libmpv log messages are delivered on mpvlib's native event thread. Forward them to Android
+     * Logcat so the existing Debug Logs screen can capture verbose mpv/FFmpeg/decoder diagnostics.
+     */
+    override fun logMessage(prefix: String, level: Int, text: String) {
+      val priority =
+        when (level) {
+          MPVLib.MpvLogLevel.MPV_LOG_LEVEL_FATAL,
+          MPVLib.MpvLogLevel.MPV_LOG_LEVEL_ERROR -> Log.ERROR
+          MPVLib.MpvLogLevel.MPV_LOG_LEVEL_WARN -> Log.WARN
+          MPVLib.MpvLogLevel.MPV_LOG_LEVEL_INFO -> Log.INFO
+          MPVLib.MpvLogLevel.MPV_LOG_LEVEL_DEBUG -> Log.DEBUG
+          MPVLib.MpvLogLevel.MPV_LOG_LEVEL_V,
+          MPVLib.MpvLogLevel.MPV_LOG_LEVEL_TRACE -> Log.VERBOSE
+          else -> Log.DEBUG
+        }
+      val logTag = "mpv-${prefix.ifBlank { "core" }}".take(23)
+      text.lineSequence().forEach { line ->
+        if (line.isNotEmpty()) Log.println(priority, logTag, line)
+      }
+    }
 
     private fun enqueue(eventId: Int? = null, action: () -> Unit) {
       val expectedGeneration = fileGeneration
@@ -194,6 +216,7 @@ object PlaybackSession : MPVLib.EventObserver {
     val observer = nativeObserver ?: return
     nativeObserver = null
     MPVLib.removeObserver(observer)
+    MPVLib.removeLogObserver(observer)
   }
 
   private val BUFFERING_STATUS_PROPERTIES = setOf("pause", "paused-for-cache", "seeking", "demuxer-via-network", "eof-reached")
@@ -578,6 +601,12 @@ internal fun userScriptsNeedReload(currentKey: String): Boolean {
         try {
           MPVLib.create(context.applicationContext)
           coreCreated = true
+          // Register before init so startup diagnostics are captured as well as playback logs.
+          NativeEventObserver().also { observer ->
+            nativeObserver = observer
+            MPVLib.addObserver(observer)
+            MPVLib.addLogObserver(observer)
+          }
           MPVLib.setOptionString("config", "yes")
           MPVLib.setOptionString("config-dir", configDir)
           MPVLib.setOptionString("gpu-shader-cache-dir", cacheDir)
@@ -599,10 +628,6 @@ internal fun userScriptsNeedReload(currentKey: String): Boolean {
           MPVLib.setPropertyString("vo", "null")
           MPVLib.setPropertyString("force-window", "no")
           MPVLib.setPropertyString("idle", "yes")
-          NativeEventObserver().also { observer ->
-            nativeObserver = observer
-            MPVLib.addObserver(observer)
-          }
           reobserveTrackedProperties()
           observeProperties()
           initialized = true
