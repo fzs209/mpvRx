@@ -129,7 +129,7 @@ jobs:
             name: Standard
             gradle: Standard
             dir: standard
-            abis: arm64-v8a
+            abis: universal arm64-v8a armeabi-v7a x86 x86_64
             asset: ''
           - id: fongmi
             name: FongMi
@@ -149,7 +149,6 @@ jobs:
       GRADLE_FLAVOR: ${{ matrix.distribution.gradle }}
       APK_DIR: ${{ matrix.distribution.dir }}
       APK_ABIS: ${{ matrix.distribution.abis }}
-      TARGET_ABI: arm64-v8a
       ASSET_NAME: ${{ matrix.distribution.asset }}
 
     steps:
@@ -173,7 +172,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ./gradlew "assemble${GRADLE_FLAVOR}Preview" -PtargetAbi="$TARGET_ABI" --stacktrace --no-daemon --max-workers=2
+          ./gradlew "assemble${GRADLE_FLAVOR}Preview" --stacktrace --no-daemon --max-workers=2
 
       - name: Sign and stage preview APKs
         shell: bash
@@ -332,7 +331,11 @@ jobs:
           publication_mode = os.environ["PUBLICATION_MODE"]
 
           public_names = [
+              "universal",
               "arm64-v8a",
+              "armeabi-v7a",
+              "x86",
+              "x86_64",
               "fongmi",
               "no-vulkan",
           ]
