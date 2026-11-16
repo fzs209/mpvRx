@@ -27,7 +27,7 @@ jobs:
             name: Standard
             gradle: Standard
             dir: standard
-            abis: arm64-v8a
+            abis: universal arm64-v8a armeabi-v7a x86 x86_64
             package: apk
           - id: fongmi
             name: FongMi
@@ -59,7 +59,6 @@ jobs:
       GRADLE_FLAVOR: ${{ matrix.distribution.gradle }}
       APK_DIR: ${{ matrix.distribution.dir }}
       APK_ABIS: ${{ matrix.distribution.abis }}
-      TARGET_ABI: arm64-v8a
 
     steps:
       - name: Checkout repository
@@ -97,14 +96,14 @@ jobs:
           if [[ "$DISTRIBUTION" != "playstore" ]]; then
             extra_args+=(-PexperimentalBuild=true)
           fi
-          ./gradlew "assemble${GRADLE_FLAVOR}Release" -PtargetAbi="$TARGET_ABI" "${extra_args[@]}" --stacktrace --no-daemon --max-workers=2
+          ./gradlew "assemble${GRADLE_FLAVOR}Release" "${extra_args[@]}" --stacktrace --no-daemon --max-workers=2
 
       - name: Build release bundle
         if: ${{ matrix.distribution.package == 'aab' }}
         shell: bash
         run: |
           set -euo pipefail
-          ./gradlew "bundle${GRADLE_FLAVOR}Release" -PtargetAbi="$TARGET_ABI" --stacktrace --no-daemon --max-workers=2
+          ./gradlew "bundle${GRADLE_FLAVOR}Release" --stacktrace --no-daemon --max-workers=2
 
       - name: Sign bundle when signing secrets are available
         if: ${{ matrix.distribution.package == 'aab' }}
@@ -215,7 +214,7 @@ jobs:
           case "$DISTRIBUTION" in
             standard)
               release_dir="app/build/outputs/apk/standard/release"
-              architectures=(arm64-v8a)
+              architectures=(universal arm64-v8a armeabi-v7a x86 x86_64)
               for abi in "${architectures[@]}"; do
                 if ! compgen -G "$release_dir/app-standard-${abi}-release*.apk" >/dev/null; then
                   echo "No standard release APK found for $abi"
@@ -226,11 +225,11 @@ jobs:
             fongmi)
               release_dir="app/build/outputs/apk/fongmi/release"
               if ! compgen -G "$release_dir/app-fongmi-universal-release*.apk" >/dev/null; then
-                echo "No ARM64 release APK found for fongmi"
+                echo "No universal release APK found for fongmi"
                 exit 1
               fi
               if find "$release_dir" -maxdepth 1 -type f -name "app-fongmi-*-release*.apk" ! -name "app-fongmi-universal-release*.apk" | grep -q .; then
-                echo "fongmi produced an unexpected APK output"
+                echo "fongmi produced an unexpected ABI-specific APK"
                 find "$release_dir" -maxdepth 1 -type f -name '*.apk' -print
                 exit 1
               fi
@@ -238,11 +237,11 @@ jobs:
             no_vulkan)
               release_dir="app/build/outputs/apk/noVulkan/release"
               if ! compgen -G "$release_dir/app-noVulkan-universal-release*.apk" >/dev/null; then
-                echo "No ARM64 non-Vulkan release APK found"
+                echo "No universal non-Vulkan release APK found"
                 exit 1
               fi
               if find "$release_dir" -maxdepth 1 -type f -name "app-noVulkan-*-release*.apk" ! -name "app-noVulkan-universal-release*.apk" | grep -q .; then
-                echo "The non-Vulkan flavor produced an unexpected APK output"
+                echo "The non-Vulkan flavor produced an unexpected ABI-specific APK"
                 find "$release_dir" -maxdepth 1 -type f -name '*.apk' -print
                 exit 1
               fi
@@ -250,11 +249,11 @@ jobs:
             playstore)
               release_dir="app/build/outputs/apk/playstore/release"
               if ! compgen -G "$release_dir/app-playstore-universal-release*.apk" >/dev/null; then
-                echo "No ARM64 Play Store release APK found"
+                echo "No universal Play Store release APK found"
                 exit 1
               fi
               if find "$release_dir" -maxdepth 1 -type f -name "app-playstore-*-release*.apk" ! -name "app-playstore-universal-release*.apk" | grep -q .; then
-                echo "The Play Store flavor produced an unexpected APK output"
+                echo "The Play Store flavor produced an unexpected ABI-specific APK"
                 find "$release_dir" -maxdepth 1 -type f -name '*.apk' -print
                 exit 1
               fi
@@ -271,7 +270,47 @@ jobs:
           retention-days: 14
           compression-level: 0
 
-      - name: Upload FongMi single ARM64-only APK
+      - name: Upload armeabi-v7a APK
+        if: ${{ matrix.distribution.id == 'standard' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: app-standard-armeabi-v7a-release-${{ steps.metadata.outputs.short_sha }}
+          path: app/build/outputs/apk/standard/release/app-standard-armeabi-v7a-release*.apk
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+      - name: Upload universal APK
+        if: ${{ matrix.distribution.id == 'standard' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: app-standard-universal-release-${{ steps.metadata.outputs.short_sha }}
+          path: app/build/outputs/apk/standard/release/app-standard-universal-release*.apk
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+      - name: Upload x86 APK
+        if: ${{ matrix.distribution.id == 'standard' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: app-standard-x86-release-${{ steps.metadata.outputs.short_sha }}
+          path: app/build/outputs/apk/standard/release/app-standard-x86-release*.apk
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+      - name: Upload x86_64 APK
+        if: ${{ matrix.distribution.id == 'standard' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: app-standard-x86_64-release-${{ steps.metadata.outputs.short_sha }}
+          path: app/build/outputs/apk/standard/release/app-standard-x86_64-release*.apk
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+      - name: Upload Fongmi universal APK
         if: ${{ matrix.distribution.id == 'fongmi' }}
         uses: actions/upload-artifact@v7
         with:
@@ -281,7 +320,7 @@ jobs:
           retention-days: 14
           compression-level: 0
 
-      - name: Upload No Vulkan single ARM64-only APK
+      - name: Upload non-Vulkan universal APK
         if: ${{ matrix.distribution.id == 'no_vulkan' }}
         uses: actions/upload-artifact@v7
         with:
@@ -291,7 +330,7 @@ jobs:
           retention-days: 14
           compression-level: 0
 
-      - name: Upload Play Store single ARM64-only APK
+      - name: Upload Play Store universal APK
         if: ${{ matrix.distribution.id == 'playstore' }}
         uses: actions/upload-artifact@v7
         with:
@@ -406,7 +445,11 @@ jobs:
           touch site/.nojekyll
 
           declare -A sources=(
+            [universal]=app-standard-universal-release.apk
             [arm64-v8a]=app-standard-arm64-v8a-release.apk
+            [armeabi-v7a]=app-standard-armeabi-v7a-release.apk
+            [x86]=app-standard-x86-release.apk
+            [x86_64]=app-standard-x86_64-release.apk
             [fongmi]=app-fongmi-universal-release.apk
             [no-vulkan]=app-noVulkan-universal-release.apk
           )
