@@ -263,17 +263,43 @@ internal object DebugLogReader {
     tag: String,
     message: String,
     occurrence: Int,
-  ): DebugLogEntry =
-    DebugLogEntry(
-      id = buildEntryId(timeMillis, pid, tid, level, tag, message, occurrence),
+  ): DebugLogEntry {
+    // mpvlibAndroid currently writes every failed property read as Android ERROR. Several reads
+    // are expected while no file is loaded or when a property is absent in this build flavor.
+    // Keep the original message, but classify these known non-fatal probes as Debug in this
+    // diagnostic viewer/export so they do not bury actual decoder/rendering failures.
+    val displayLevel =
+      if (
+        level == DebugLogLevel.Error &&
+        tag == "mpv" &&
+        message.startsWith("mpv_get_property(") &&
+        (
+          message.contains("returned error property unavailable") ||
+            (
+              message.contains("option-info/motion-interpolation/name") &&
+                message.contains("returned error property not found")
+            ) ||
+            (
+              message.contains("user-data/mpvrx/startup-stats-applied") &&
+                message.contains("returned error property not found")
+            )
+        )
+      ) {
+        DebugLogLevel.Debug
+      } else {
+        level
+      }
+    return DebugLogEntry(
+      id = buildEntryId(timeMillis, pid, tid, displayLevel, tag, message, occurrence),
       timeMillis = timeMillis,
       timestamp = formatDisplayTime(timeMillis),
-      level = level,
+      level = displayLevel,
       tag = tag,
       message = message,
       pid = pid,
       tid = tid,
     )
+  }
 
   private fun runCommand(
     command: List<String>,
