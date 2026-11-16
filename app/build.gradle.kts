@@ -353,7 +353,7 @@ androidComponents {
           .find { it.filterType == FilterConfiguration.FilterType.ABI }
           ?.identifier
 
-      if (isUniversalOnly && abi != null) {
+      if (isUniversalOnly && activeAbis.size > 1 && abi != null) {
         output.enabled.set(false)
       }
 
