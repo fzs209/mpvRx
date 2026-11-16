@@ -135,6 +135,7 @@ class PlaybackProperty<T> internal constructor(
 @Suppress("TooManyFunctions")
 object PlaybackSession : MPVLib.EventObserver {
   private const val TAG = "PlaybackSession"
+  private const val LOG_DIAGNOSTICS_TAG = "mpvRx-logging"
   private const val SPATIAL_AUDIO_LABEL = "mpvrx-spatial"
   // Increase side/mid ratio without adding peak gain: each row's absolute weights sum to 1.
   private const val SPATIAL_AUDIO_FILTER =
@@ -156,12 +157,22 @@ object PlaybackSession : MPVLib.EventObserver {
 
   private class NativeEventObserver : MPVLib.EventObserver, MPVLib.LogObserver {
     @Volatile private var fileGeneration: Long? = null
+    private val logCallbackCount = AtomicLong()
+
+    fun receivedLogMessageCount(): Long = logCallbackCount.get()
 
     /**
      * libmpv log messages are delivered on mpvlib's native event thread. Forward them to Android
      * Logcat so the existing Debug Logs screen can capture verbose mpv/FFmpeg/decoder diagnostics.
      */
     override fun logMessage(prefix: String, level: Int, text: String) {
+      val count = logCallbackCount.incrementAndGet()
+      if (count == 1L) {
+        Log.i(
+          LOG_DIAGNOSTICS_TAG,
+          "First MPV_EVENT_LOG_MESSAGE reached Kotlin: prefix=$prefix level=$level",
+        )
+      }
       val priority =
         when (level) {
           MPVLib.MpvLogLevel.MPV_LOG_LEVEL_FATAL,
@@ -606,6 +617,10 @@ internal fun userScriptsNeedReload(currentKey: String): Boolean {
             nativeObserver = observer
             MPVLib.addObserver(observer)
             MPVLib.addLogObserver(observer)
+            Log.i(
+              LOG_DIAGNOSTICS_TAG,
+              "Registered MPV EventObserver and LogObserver before init; native log request uses terminal-default",
+            )
           }
           MPVLib.setOptionString("config", "yes")
           MPVLib.setOptionString("config-dir", configDir)
@@ -1750,6 +1765,48 @@ internal fun userScriptsNeedReload(currentKey: String): Boolean {
     setOptionString("deband", if (mode == Debanding.GPU) "yes" else "no")
     removeVideoFilter("deband")
     if (mode == Debanding.CPU) command("vf", "add", "@deband:gradfun=radius=12")
+  }
+
+  /**
+   * Reapply mpv's log level after mpv.conf has been loaded, and update an already-running core
+   * when the user toggles Verbose Logging. The native library requests "terminal-default", so
+   * MPV_EVENT_LOG_MESSAGE follows the effective msg-level option rather than a stale threshold.
+   */
+  fun applyVerboseLogging(
+    enabled: Boolean,
+    source: String,
+  ): Boolean {
+    val requestedLevel = if (enabled) "all=v" else "all=warn"
+    val applied =
+      withReadyCore(false) {
+        runCatching {
+          MPVLib.setPropertyString("msg-level", requestedLevel)
+          MPVLib.command("request_log_messages", "terminal-default")
+          val effectiveLevel = MPVLib.getPropertyString("msg-level")
+          val callbacks = nativeObserver?.receivedLogMessageCount() ?: 0L
+          val observerRegistered = nativeObserver != null
+          val matches = effectiveLevel == requestedLevel
+          Log.i(
+            LOG_DIAGNOSTICS_TAG,
+            "source=$source verboseLogging=$enabled requestedMsgLevel=$requestedLevel " +
+              "effectiveMsgLevel=${effectiveLevel ?: "<unavailable>"} " +
+              "requestLogMessages=terminal-default observerRegistered=$observerRegistered " +
+              "logCallbacks=$callbacks applied=$matches",
+          )
+          matches
+        }.getOrElse { error ->
+          Log.e(LOG_DIAGNOSTICS_TAG, "Failed to apply msg-level=$requestedLevel from $source", error)
+          false
+        }
+      }
+    if (!applied) {
+      Log.i(
+        LOG_DIAGNOSTICS_TAG,
+        "source=$source verboseLogging=$enabled saved; no ready core or effective msg-level did not match. " +
+          "The next core initialization will apply the preference.",
+      )
+    }
+    return applied
   }
 
   fun observeProperty(
