@@ -102,7 +102,7 @@ jobs:
             name: Standard
             gradle: Standard
             dir: standard
-            abis: arm64-v8a
+            abis: universal arm64-v8a armeabi-v7a x86 x86_64
             asset: ''
             package: apk
           - id: fongmi
@@ -139,7 +139,6 @@ jobs:
       GRADLE_FLAVOR: ${{ matrix.distribution.gradle }}
       APK_DIR: ${{ matrix.distribution.dir }}
       APK_ABIS: ${{ matrix.distribution.abis }}
-      TARGET_ABI: arm64-v8a
       ASSET_NAME: ${{ matrix.distribution.asset }}
 
     steps:
@@ -164,14 +163,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ./gradlew "assemble${GRADLE_FLAVOR}Release" -PtargetAbi="$TARGET_ABI" --stacktrace --no-daemon --max-workers=2
+          ./gradlew "assemble${GRADLE_FLAVOR}Release" --stacktrace --no-daemon --max-workers=2
 
       - name: Build release bundle
         if: ${{ matrix.distribution.package == 'aab' }}
         shell: bash
         run: |
           set -euo pipefail
-          ./gradlew "bundle${GRADLE_FLAVOR}Release" -PtargetAbi="$TARGET_ABI" --stacktrace --no-daemon --max-workers=2
+          ./gradlew "bundle${GRADLE_FLAVOR}Release" --stacktrace --no-daemon --max-workers=2
 
       - name: Sign and stage release bundle
         if: ${{ matrix.distribution.package == 'aab' }}
@@ -306,7 +305,7 @@ jobs:
         run: |
           set -euo pipefail
           : > checksums.txt
-          variants=(arm64-v8a fongmi no-vulkan playstore)
+          variants=(universal arm64-v8a armeabi-v7a x86 x86_64 fongmi no-vulkan playstore)
           for variant in "${variants[@]}"; do
             asset="release-assets/mpvRx-${variant}-${VERSION_TAG}.apk"
             if [[ ! -f "$asset" ]]; then
@@ -353,12 +352,10 @@ jobs:
 
           All variants contain the same mpvRx app version, with their native backends built from [mpvlib Android](https://github.com/Riteshp2001/mpvlibAndroid). Choose the package that best matches your device:
 
-          - **Standard** (`mpvRx-arm64-v8a-<version>.apk`): Recommended for most 64-bit ARM devices, with the standard Vulkan-capable playback backend.
-          - **FongMi** (`mpvRx-fongmi-<version>.apk`): ARM64-only package using the FongMi native profile for Vulkan, direct MediaCodec, and Dolby Vision playback.
-          - **Non-Vulkan** (`mpvRx-no-vulkan-<version>.apk`): ARM64-only OpenGL package for devices without compatible Vulkan support or with unstable legacy GPU drivers.
-          - **Play Store** (`mpvRx-playstore-<version>.apk`): ARM64-only APK of the Google Play build, which leaves out features Google Play does not allow, such as yt-dlp, torrent streaming, and in-app updates. `mpvRx-playstore-<version>.aab` is the same ARM64-only build as an app bundle for Play Console upload.
-
-          All APKs and app bundles from these workflows include only `arm64-v8a` native libraries.
+          - **Standard** (`mpvRx-<architecture>-<version>.apk`): Recommended for most devices. Available as Universal and architecture-specific APKs with the standard Vulkan-capable playback backend.
+          - **FongMi** (`mpvRx-fongmi-<version>.apk`): Universal package using the FongMi native profile for Vulkan, direct MediaCodec, and Dolby Vision playback.
+          - **Non-Vulkan** (`mpvRx-no-vulkan-<version>.apk`): Universal OpenGL-only package for devices without compatible Vulkan support or with unstable legacy GPU drivers.
+          - **Play Store** (`mpvRx-playstore-<version>.apk`): Universal APK of the Google Play build, which leaves out features Google Play does not allow, such as yt-dlp, torrent streaming, and in-app updates. `mpvRx-playstore-<version>.aab` is the same build as an app bundle for Play Console upload.
           """.strip()
           Path('release-notes.md').write_text(
               latest + '\n\n---\n' + variant_guide + '\n\n### SHA-256 checksums\n\n```text\n',
