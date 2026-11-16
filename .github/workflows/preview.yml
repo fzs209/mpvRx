@@ -135,13 +135,13 @@ jobs:
             name: FongMi
             gradle: Fongmi
             dir: fongmi
-            abis: universal
+            abis: arm64-v8a
             asset: fongmi
           - id: no_vulkan
             name: No Vulkan
             gradle: NoVulkan
             dir: noVulkan
-            abis: universal
+            abis: arm64-v8a
             asset: no-vulkan
     env:
       MEASURE_API_KEY: ${{ secrets.MEASURE_API_KEY }}
