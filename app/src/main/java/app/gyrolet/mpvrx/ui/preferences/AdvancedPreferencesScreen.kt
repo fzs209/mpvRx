@@ -71,6 +71,7 @@ import app.gyrolet.mpvrx.ui.icons.Icon
 import app.gyrolet.mpvrx.ui.icons.Icons
 import app.gyrolet.mpvrx.ui.player.NotificationStyle
 import app.gyrolet.mpvrx.ui.player.MpvConfigCache
+import app.gyrolet.mpvrx.ui.player.PlaybackSession
 import app.gyrolet.mpvrx.ui.preferences.components.SwitchPreference
 import app.gyrolet.mpvrx.ui.preferences.components.RestartRequiredDialog
 import app.gyrolet.mpvrx.ui.utils.LocalBackStack
@@ -1105,7 +1106,12 @@ object AdvancedPreferencesScreen : Screen {
               SwitchPreference(
                 modifier = Modifier.settingsSearchTarget(R.string.pref_advanced_verbose_logging_title),
                 value = verboseLogging,
-                onValueChange = preferences.verboseLogging::set,
+                onValueChange = { enabled ->
+                  preferences.verboseLogging.set(enabled)
+                  scope.launch(Dispatchers.IO) {
+                    PlaybackSession.applyVerboseLogging(enabled, source = "settings")
+                  }
+                },
                 title = { Text(stringResource(R.string.pref_advanced_verbose_logging_title)) },
                 summary = {
                   Text(
