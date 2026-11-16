@@ -248,7 +248,7 @@ android {
       isEnable = !isBundleBuild
       reset()
       include(*activeAbis.toTypedArray())
-      isUniversalApk = true
+      isUniversalApk = activeAbis.size > 1
     }
   }
 
@@ -358,12 +358,7 @@ androidComponents {
           .find { it.filterType == FilterConfiguration.FilterType.ABI }
           ?.identifier
 
-      // Flavors published as a single APK use the splitless output, while Standard
-      // publishes only the explicit ARM64 split. Keep one main output in either case.
       if (isUniversalOnly && abi != null) {
-        output.enabled.set(false)
-      }
-      if (!isUniversalOnly && abi == null && !isBundleBuild) {
         output.enabled.set(false)
       }
 
