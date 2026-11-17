@@ -1216,6 +1216,29 @@ class MPVView(
     gpuNextEnabled: Boolean,
     vulkanEnabled: Boolean,
   ): RenderBackendSelection {
+    val selection =
+      selectRenderBackendInternal(mediaCodecEmbed, anime4kEnabled, gpuNextEnabled, vulkanEnabled)
+    // FongMi's libmpv is built from an mpv development snapshot whose legacy vo=gpu OSD renderer
+    // is broken: video/out/gpu/osd.c declares its vertex attributes positionally, but the
+    // snapshot's ra_renderpass_input gained sampler fields ahead of dim_v, so the OSD render
+    // pass is created with dim_v taken from the attribute byte offsets (0/8/16) and shader
+    // compilation aborts the whole process (video/out/gpu/shader_cache.c: vao_glsl_type,
+    // MP_ASSERT_UNREACHABLE). The first libass OSD draw — opening the statistics overlay or
+    // showing an ASS subtitle — kills the app. gpu-next renders OSD through libplacebo and is
+    // unaffected, so a FongMi core must never stay on the legacy renderer.
+    if (!FongMiMpv.isBuildSupported || selection.vo != "gpu") return selection
+    return selection.copy(
+      vo = "gpu-next",
+      reason = "${selection.reason}; FongMi build: legacy gpu OSD renderer crashes, using gpu-next",
+    )
+  }
+
+  private fun selectRenderBackendInternal(
+    mediaCodecEmbed: Boolean,
+    anime4kEnabled: Boolean,
+    gpuNextEnabled: Boolean,
+    vulkanEnabled: Boolean,
+  ): RenderBackendSelection {
 
     if (mediaCodecEmbed) {
       return RenderBackendSelection(
