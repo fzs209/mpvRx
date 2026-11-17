@@ -35,6 +35,10 @@ index 29acd79..0000000 100644
      bool gpu_dovi_mapping = supports_gpu_dovi_mapping(ctx);
      set_decoder_avopts(vd->log, avctx, lavc_param->avopts,
                         native_dovi_sink, gpu_dovi_mapping);
+diff --git a/player/video.c b/player/video.c
+index 88ca3f4..0000000 100644
+--- a/player/video.c
++++ b/player/video.c
 @@ -510,6 +510,14 @@ static bool reinit_video_chain_internal(struct MPContext *mpctx,
          mpctx->mouse_cursor_visible = true;
      }
