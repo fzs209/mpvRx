@@ -3128,4 +3128,5 @@
   <string name="theme_color_primary">主强调色</string>
   <string name="theme_color_secondary">次强调色</string>
   <string name="theme_color_tertiary">高亮强调色</string>
+  <string name="pref_decoder_dolby_vision_direct_embed_note">MediaCodec Embed 的字幕和 OSD 叠加层不受此开关影响；此开关仅控制 Dolby Vision 直通输出。</string>
 </resources>
