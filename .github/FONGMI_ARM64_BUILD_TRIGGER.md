@@ -1,0 +1,1 @@
+Temporary pull-request trigger for the FongMi ARM64-only CI build. This file is not part of the application and should not be merged.
