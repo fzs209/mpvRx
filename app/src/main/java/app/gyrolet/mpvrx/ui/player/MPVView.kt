@@ -129,22 +129,70 @@ class MPVView(
 
   /** A slow Surface must not prevent the media load and its watchdog from starting. */
   internal suspend fun awaitSurfaceReady(): Boolean {
-    val deadline = SystemClock.elapsedRealtime() + SURFACE_READY_TIMEOUT_MS
+    val startedAt = SystemClock.elapsedRealtime()
+    val deadline = startedAt + SURFACE_READY_TIMEOUT_MS
+    var lastReason: String? = null
+    var lastReasonLogAt = 0L
     while (SystemClock.elapsedRealtime() < deadline) {
+      var reason: String? = null
       val attached =
         withContext(Dispatchers.Main.immediate) {
           when {
             ensureSurfaceAttached() -> true
             // A hidden window (backgrounded/locked) will not create a Surface until it returns.
             isExiting || !surfaceBindingEnabled || !renderCallbacksEnabled ||
-              (isAttachedToWindow && windowVisibility != VISIBLE) -> false
-            else -> null
+              (isAttachedToWindow && windowVisibility != VISIBLE) -> {
+              reason =
+                "not waiting: exiting=$isExiting binding=$surfaceBindingEnabled " +
+                  "callbacks=$renderCallbacksEnabled attachedToWindow=$isAttachedToWindow " +
+                  "windowVisibility=$windowVisibility"
+              false
+            }
+            else -> {
+              reason = surfaceWaitReason()
+              null
+            }
           }
         }
-      if (attached != null) return attached
+      if (attached != null) {
+        if (reason != null || lastReason != null) {
+          Log.d(
+            TAG,
+            "SurfaceDiag: surface wait ended after ${SystemClock.elapsedRealtime() - startedAt} ms " +
+              "(ready=$attached, reason=${reason ?: lastReason})",
+          )
+        }
+        return attached
+      }
+      // SurfaceDiag: name the blocking precondition, at most once per second per reason,
+      // so a reproduction log shows which stage of the handoff stalled.
+      val now = SystemClock.elapsedRealtime()
+      if (reason != null && (reason != lastReason || now - lastReasonLogAt >= 1_000L)) {
+        Log.d(TAG, "SurfaceDiag: waiting for surface (${now - startedAt} ms): $reason")
+        lastReason = reason
+        lastReasonLogAt = now
+      }
       withTimeoutOrNull(SURFACE_RETRY_MS) { surfaceReadiness.first { it } }
     }
+    Log.w(
+      TAG,
+      "SurfaceDiag: surface wait timed out after ${SystemClock.elapsedRealtime() - startedAt} ms; " +
+        "last reason: ${lastReason ?: "unknown"}",
+    )
     return false
+  }
+
+  /** Diagnostic for [awaitSurfaceReady]: which precondition is keeping the surface unready. */
+  private fun surfaceWaitReason(): String {
+    val surface = renderSurface ?: return "no render surface yet (surfaceCreated not delivered)"
+    if (!surface.isValid) return "render surface exists but is invalid"
+    if (!isAttachedToWindow) return "view not attached to window"
+    if (windowVisibility != VISIBLE) return "window not visible (visibility=$windowVisibility)"
+    if (!PlaybackSession.isSurfaceAttachedTo(this)) {
+      return "surface valid but not yet bound to the playback session"
+    }
+    if (!PlaybackSession.isRendererReadyFor(this)) return "surface bound but renderer not ready"
+    return "surface present and bound; readiness flag not yet set"
   }
 
   /**
@@ -745,6 +793,11 @@ class MPVView(
   }
 
   override fun onRenderSurfaceAvailable(surface: Surface, width: Int, height: Int) {
+    Log.d(
+      TAG,
+      "SurfaceDiag: render surface available ${width}x$height valid=${surface.isValid} " +
+        "attachedToWindow=$isAttachedToWindow windowVisibility=$windowVisibility",
+    )
     attachRenderSurface(surface, width, height, retriesRemaining = 2)
   }
 
@@ -808,6 +861,7 @@ class MPVView(
   }
 
   override fun onRenderSurfaceDestroyed() {
+    Log.d(TAG, "SurfaceDiag: render surface destroyed")
     cancelSurfaceRecovery()
     cancelPausedFrameRedraw()
     surfaceAttachmentGeneration++
