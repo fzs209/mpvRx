@@ -30,9 +30,6 @@ on:
   push:
     branches:
       - fix/fongmi-legacy-gpu-osd-crash
-    paths:
-      - "native-patches/**"
-      - ".github/workflows/build-fongmi-patched.yml"
 
 permissions:
   contents: read

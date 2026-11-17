@@ -1,10 +1,8 @@
 name: CI/CD Build
 
+# Automatic triggers are disabled on purpose: this workflow is manual-only.
+# The fix branch's automatic build is .github/workflows/build-fongmi-patched.yml.
 on:
-  push:
-    branches:
-      - fix/fongmi-legacy-gpu-osd-crash
-  pull_request:
   workflow_dispatch:
 
 permissions:
