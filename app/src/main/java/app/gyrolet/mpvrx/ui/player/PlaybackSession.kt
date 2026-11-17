@@ -817,8 +817,9 @@ internal fun userScriptsNeedReload(currentKey: String): Boolean {
         attachedOsdOwner = owner
         // MediaCodec embed needs this overlay independently of whether DV passthrough is allowed.
         // Enforce the renderer invariant here as a final guard; callers cannot accidentally opt in.
-        val allowDirect = directDolbyVisionAllowed && desiredVideoOutput != MediaCodecEmbed.VO
-        setDolbyVisionOutputLocked(if (allowDirect) "direct" else "configured")
+        val embed = desiredVideoOutput == MediaCodecEmbed.VO
+        val allowDirect = directDolbyVisionAllowed && !embed
+        setDolbyVisionOutputLocked(if (allowDirect) "direct" else "configured", force = embed)
       }.onFailure { error ->
         Log.e(TAG, "Could not attach the subtitle overlay Surface", error)
         detachOsdSurfaceLocked()
@@ -832,8 +833,9 @@ internal fun userScriptsNeedReload(currentKey: String): Boolean {
   ): Boolean =
     withCore(default = false) {
       if (attachedOsdOwner !== owner) return@withCore false
-      val allowDirect = directDolbyVisionAllowed && desiredVideoOutput != MediaCodecEmbed.VO
-      setDolbyVisionOutputLocked(if (allowDirect) "direct" else "configured")
+      val embed = desiredVideoOutput == MediaCodecEmbed.VO
+      val allowDirect = directDolbyVisionAllowed && !embed
+      setDolbyVisionOutputLocked(if (allowDirect) "direct" else "configured", force = embed)
       true
     }
 
@@ -879,12 +881,25 @@ internal fun userScriptsNeedReload(currentKey: String): Boolean {
     attachedOsdOwner = null
   }
 
-  private fun setDolbyVisionOutputLocked(output: String) {
+  private fun setDolbyVisionOutputLocked(
+    output: String,
+    force: Boolean = false,
+  ) {
     if (appliedDolbyVisionOutput == output) return
-    if (!MpvConfigOverridePolicy.isOwnedByMpvConf("android-dolby-vision-output")) {
-      MPVLib.setPropertyString("android-dolby-vision-output", output)
+    val ownedByMpvConf = MpvConfigOverridePolicy.isOwnedByMpvConf("android-dolby-vision-output")
+    if (ownedByMpvConf && !force) {
+      // Do not claim that an output change was applied when mpv.conf owns the property.
+      Log.i(TAG, "Keeping mpv.conf-owned android-dolby-vision-output; requested=$output")
+      return
     }
+    if (ownedByMpvConf && force) {
+      // This is a hard renderer-safety invariant: Embed cannot be combined with DV passthrough.
+      Log.w(TAG, "Overriding mpv.conf android-dolby-vision-output=direct because MediaCodec Embed is active")
+    }
+    MPVLib.setPropertyString("android-dolby-vision-output", output)
     appliedDolbyVisionOutput = output
+    val actual = runCatching { MPVLib.getPropertyString("android-dolby-vision-output") }.getOrNull()
+    Log.i(TAG, "Dolby Vision output requested=$output, actual=$actual, embed=$force")
     applyDolbyVisionProfile7Locked()
   }
 
