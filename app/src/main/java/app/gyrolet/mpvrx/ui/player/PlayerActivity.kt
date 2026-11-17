@@ -1350,6 +1350,11 @@ class PlayerActivity :
         }.distinctUntilChanged().collect { player.setOsdOverlay(it) }
       }
       lifecycleScope.launch {
+        decoderPreferences.dolbyVisionDirect.changes().collect { enabled ->
+          PlaybackSession.setDolbyVisionDirectEnabled(enabled)
+        }
+      }
+      lifecycleScope.launch {
         repeatOnLifecycle(Lifecycle.State.STARTED) {
           PlaybackSession.propString[ANDROID_VIDEO_RECT].collect { player.setVideoRect(it) }
         }
