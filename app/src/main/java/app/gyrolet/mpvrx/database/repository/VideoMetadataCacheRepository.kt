@@ -25,6 +25,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.pow
 
 /**
@@ -47,6 +48,11 @@ class VideoMetadataCacheRepository(
 
   // Folder totals, Library and individual folders can request the same document concurrently.
   private val contentLocks = Array(64) { Mutex() }
+
+  // Probes that failed or found no duration, remembered for this process under their
+  // version key (content key + size + modified time), so a broken or exotic file is not
+  // re-probed from scratch on every folder visit. A changed file gets a new key.
+  private val failedContentProbes = ConcurrentHashMap.newKeySet<String>()
 
   private fun contentKey(path: String, uri: Uri): String =
     CONTENT_KEY_PREFIX + (ScopedHiddenFolderScanner.localPathOf(uri)
@@ -99,8 +105,14 @@ class VideoMetadataCacheRepository(
         return@withLock metadata.copy(videoCodec = codec.label, videoCodecMimeType = codec.mimeType)
       }
 
+      if (versionKey in failedContentProbes) return@withLock null
+
       val metadata = MediaInfoOps.extractBasicMetadata(context, video.uri, video.displayName, versionKey)
-        .getOrNull() ?: return@withLock null
+        .getOrNull()
+      if (metadata == null) {
+        failedContentProbes += versionKey
+        return@withLock null
+      }
       // A failed/incomplete probe must not become a permanently cached zero duration.
       if (metadata.durationMs > 0L) {
         dao.insertMetadata(
@@ -117,6 +129,8 @@ class VideoMetadataCacheRepository(
             lastScanned = System.currentTimeMillis(),
           ),
         )
+      } else {
+        failedContentProbes += versionKey
       }
       metadata
     }

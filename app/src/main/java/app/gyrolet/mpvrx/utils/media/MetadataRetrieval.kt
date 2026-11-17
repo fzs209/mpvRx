@@ -22,6 +22,9 @@ import app.gyrolet.mpvrx.utils.storage.VideoScanUtils
 import java.io.File
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 
@@ -34,6 +37,9 @@ import kotlinx.coroutines.withContext
  */
 object MetadataRetrieval {
   private const val TAG = "MetadataRetrieval"
+
+  /** How many content-URI probes may run at once during a folder enrichment pass. */
+  private const val CONTENT_PROBE_PARALLELISM = 4
 
   /**
    * Checks if video-specific metadata is needed
@@ -135,13 +141,38 @@ object MetadataRetrieval {
     includeVideoCodec: Boolean,
   ): Map<String, MediaInfoOps.VideoMetadata> {
     val metadataByVideoPath = mutableMapOf<String, MediaInfoOps.VideoMetadata>()
-    for (video in videos.filter { it.uri.scheme == "content" }) {
-      kotlinx.coroutines.currentCoroutineContext().ensureActive()
-      metadataCache.getOrExtractContentMetadata(
-        video,
-        includeVideoCodec && !video.isAudio && video.videoCodec.isBlank(),
-      )?.let {
-        metadataByVideoPath[video.path] = it
+    val contentVideos = videos.filter { it.uri.scheme == "content" }
+    if (contentVideos.isNotEmpty()) {
+      // Serve everything the database already knows with one batch query first; only
+      // videos without a usable cached entry (or still missing their codec) need a probe.
+      val cachedByPath = metadataCache.getCachedContentMetadata(contentVideos)
+      metadataByVideoPath.putAll(cachedByPath)
+      val needsExtraction =
+        contentVideos.filter { video ->
+          val cached = cachedByPath[video.path]
+          cached == null ||
+            (includeVideoCodec && !video.isAudio && video.videoCodec.isBlank() &&
+              cached.videoCodec.isBlank())
+        }
+      // Probing is the slow part of a folder scan and used to run strictly one file at a
+      // time for content URIs; run a few probes concurrently, like the local-file batch.
+      needsExtraction.chunked(CONTENT_PROBE_PARALLELISM).forEach { batch ->
+        coroutineScope {
+          batch
+            .map { video ->
+              async {
+                video.path to
+                  metadataCache.getOrExtractContentMetadata(
+                    video,
+                    includeVideoCodec && !video.isAudio && video.videoCodec.isBlank(),
+                  )
+              }
+            }
+            .awaitAll()
+            .forEach { (path, metadata) ->
+              if (metadata != null) metadataByVideoPath[path] = metadata
+            }
+        }
       }
     }
     val localFiles =

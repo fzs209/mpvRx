@@ -360,7 +360,7 @@ object MediaInfoOps {
       }?.let { cached -> return@withContext Result.success(cached) }
 
       val result = runCatching {
-        platformProbe(context, uri)?.metadata
+        platformProbe(context, uri, basicOnly = true)?.metadata
           ?: VideoMetadata(0L, 0L, 0, 0, 0f, false)
       }
       result.getOrNull()?.takeIf { it.durationMs > 0L }?.let { metadata ->
@@ -389,7 +389,7 @@ object MediaInfoOps {
         videoCodecCache.get(cacheKey)
       }?.let { return@withContext it }
 
-      val metadata = runCatching { platformProbe(context, uri)?.metadata }.getOrNull()
+      val metadata = runCatching { platformProbe(context, uri, basicOnly = true)?.metadata }.getOrNull()
       val codec = metadata?.let {
         VideoCodecDescriptor(it.videoCodec.ifBlank { "UNKNOWN" }, it.videoCodecMimeType)
       } ?: VideoCodecDescriptor("UNKNOWN", "")
@@ -445,7 +445,11 @@ object MediaInfoOps {
       else -> ""
     }
 
-  private fun platformProbe(context: Context, uri: Uri): PlatformProbe? {
+  private fun platformProbe(
+    context: Context,
+    uri: Uri,
+    basicOnly: Boolean = false,
+  ): PlatformProbe? {
     // Keep the descriptor owned by ParcelFileDescriptor. Never detach/close a raw
     // FD in multiple native libraries; each framework parser borrows it here.
     val descriptor = context.contentResolver.openFileDescriptor(uri, "r") ?: return null
@@ -461,26 +465,6 @@ object MediaInfoOps {
       val audioStreams = mutableListOf<AudioStreamInfo>()
       val textStreams = mutableListOf<TextStreamInfo>()
       var videoCodec = VideoCodecDescriptor("", "")
-
-      val retriever = MediaMetadataRetriever()
-      try {
-        retriever.setDataSource(fd)
-        durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
-          ?.toLongOrNull() ?: 0L
-        width = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)
-          ?.toIntOrNull() ?: 0
-        height = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)
-          ?.toIntOrNull() ?: 0
-        fps = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_CAPTURE_FRAMERATE)
-          ?.toFloatOrNull() ?: 0f
-        rotation = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)
-          ?.toIntOrNull() ?: 0
-        mediaMime = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_MIMETYPE).orEmpty()
-      } catch (e: Exception) {
-        Log.w(TAG, "Framework retriever could not read ${uri.lastPathSegment}", e)
-      } finally {
-        retriever.release()
-      }
 
       val extractor = MediaExtractor()
       try {
@@ -542,10 +526,39 @@ object MediaInfoOps {
           }
         }
       } catch (e: Exception) {
-        // Missing tracks should not crash a library scan; keep retriever results.
+        // Missing tracks should not crash a library scan; keep the fields already gathered.
         Log.w(TAG, "Framework extractor could not read ${uri.lastPathSegment}", e)
       } finally {
         extractor.release()
+      }
+
+      // The retriever parses the container a second time. It runs after the extractor
+      // and only overrides fields it positively identifies (its container duration,
+      // dimensions and capture frame rate keep their traditional precedence, and it is
+      // the only source of rotation and the container mime type). Basic probes - the
+      // library scan and codec lookups - skip it entirely once the extractor has
+      // provided every core field, which halves the cost of a scan probe.
+      if (!basicOnly || durationMs <= 0L || width <= 0 || height <= 0 || fps <= 0f) {
+        val retriever = MediaMetadataRetriever()
+        try {
+          retriever.setDataSource(fd)
+          retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
+            ?.toLongOrNull()?.takeIf { it > 0L }?.let { durationMs = it }
+          retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)
+            ?.toIntOrNull()?.takeIf { it > 0 }?.let { width = it }
+          retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)
+            ?.toIntOrNull()?.takeIf { it > 0 }?.let { height = it }
+          retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_CAPTURE_FRAMERATE)
+            ?.toFloatOrNull()?.takeIf { it > 0f }?.let { fps = it }
+          rotation = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)
+            ?.toIntOrNull() ?: rotation
+          mediaMime = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_MIMETYPE)
+            ?.takeIf { it.isNotBlank() } ?: mediaMime
+        } catch (e: Exception) {
+          Log.w(TAG, "Framework retriever could not read ${uri.lastPathSegment}", e)
+        } finally {
+          retriever.release()
+        }
       }
 
       val subtitleCodecs = textStreams.map { it.format }.distinct().joinToString(" ")

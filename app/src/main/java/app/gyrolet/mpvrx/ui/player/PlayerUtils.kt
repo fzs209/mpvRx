@@ -15,6 +15,7 @@ import android.net.Uri
 import android.provider.DocumentsContract
 import android.provider.MediaStore
 import android.util.Log
+import android.util.LruCache
 import app.gyrolet.mpvrx.domain.network.NetworkPlaybackUri
 import app.gyrolet.mpvrx.domain.network.XtreamPlaybackUri
 import app.gyrolet.mpvrx.ui.player.PlayerActivity.Companion.TAG
@@ -32,6 +33,24 @@ private object StoragePaths {
   const val PRIMARY_STORAGE = "/storage/emulated/0"
   const val EXTERNAL_STORAGE = "/storage"
   const val MEDIA_RW = "/mnt/media_rw"
+}
+
+/**
+ * Process-wide cache of content URI -> real path resolutions. Scanning, metadata
+ * enrichment and thumbnail loading used to re-run the same MediaStore query for the
+ * same URI many times in one session (a single file could be resolved dozens of
+ * times); a successful resolution stays valid for the lifetime of the process.
+ * Only real paths are cached, never detached file descriptors.
+ */
+private const val RESOLVED_PATH_CACHE_ENTRIES = 512
+
+private val resolvedPathCache = LruCache<String, String>(RESOLVED_PATH_CACHE_ENTRIES)
+
+private fun cachedResolvedPath(uri: Uri): String? =
+  synchronized(resolvedPathCache) { resolvedPathCache.get(uri.toString()) }
+
+private fun cacheResolvedPath(uri: Uri, path: String) {
+  synchronized(resolvedPathCache) { resolvedPathCache.put(uri.toString(), path) }
 }
 
 /**
@@ -116,8 +135,9 @@ private fun Uri.tryFileDescriptorPath(
  * Method 2: Query MediaStore for direct file path.
  * Works for media files indexed by MediaStore (videos, music, images).
  */
-private fun Uri.tryMediaStoreQuery(context: Context): String? =
-  runCatching {
+private fun Uri.tryMediaStoreQuery(context: Context): String? {
+  cachedResolvedPath(this)?.let { return it }
+  return runCatching {
     context.contentResolver
       .query(this, arrayOf(MediaStore.MediaColumns.DATA), null, null, null)
       ?.use { cursor ->
@@ -130,6 +150,7 @@ private fun Uri.tryMediaStoreQuery(context: Context): String? =
                 path.isNotBlank() && File(path).canRead()
               }?.also {
                 Log.d(TAG, "Resolved via MediaStore: $it")
+                cacheResolvedPath(this, it)
               }
           } else {
             null
@@ -141,6 +162,7 @@ private fun Uri.tryMediaStoreQuery(context: Context): String? =
   }.onFailure { e ->
     Log.d(TAG, "MediaStore query failed: ${e.message}")
   }.getOrNull()
+}
 
 /**
  * Method 3: Parse DocumentsContract URIs manually.
@@ -152,6 +174,7 @@ private fun Uri.tryMediaStoreQuery(context: Context): String? =
  * - "1234-5678:Movies/video.mp4" → External SD card path
  */
 private fun Uri.tryDocumentUriParsing(context: Context): String? {
+  cachedResolvedPath(this)?.let { return it }
   if (!DocumentsContract.isDocumentUri(context, this)) return null
 
   return runCatching {
@@ -174,7 +197,7 @@ private fun Uri.tryDocumentUriParsing(context: Context): String? {
     }
   }.onFailure { e ->
     Log.d(TAG, "Document URI parsing failed: ${e.message}")
-  }.getOrNull()
+  }.getOrNull()?.also { cacheResolvedPath(this, it) }
 }
 
 private fun tryPrimaryStoragePath(docId: String): String? {
