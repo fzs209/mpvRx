@@ -39,9 +39,13 @@ internal object DolbyVisionDirect {
    */
   fun canUseDirectOutput(
     userRequested: Boolean,
+    mediaCodecEmbed: Boolean,
     displaySupport: DisplayHdrSupport,
   ): Boolean =
-    isBuildSupported && userRequested && displaySupport.known && displaySupport.dolbyVision
+    // MediaCodec Embed is a raw Surface sink. It must never be treated as a request for DV
+    // passthrough: its OSD overlay is required for subtitles, not evidence of DV compatibility.
+    isBuildSupported && userRequested && !mediaCodecEmbed &&
+      displaySupport.known && displaySupport.dolbyVision
 
   fun attachOsdSurface(surface: Surface) {
     attachMethod?.invoke(MPVLib, surface)
