@@ -804,6 +804,7 @@ internal fun userScriptsNeedReload(currentKey: String): Boolean {
     width: Int,
     height: Int,
     owner: Any,
+    directDolbyVisionAllowed: Boolean,
   ): Boolean =
     withCore(default = false) {
       if (!DolbyVisionDirect.isBuildSupported || !surface.isValid || width <= 0 || height <= 0) {
@@ -814,11 +815,23 @@ internal fun userScriptsNeedReload(currentKey: String): Boolean {
         DolbyVisionDirect.attachOsdSurface(surface)
         MPVLib.setPropertyString("android-osd-surface-size", "${width}x$height")
         attachedOsdOwner = owner
-        setDolbyVisionOutputLocked("direct")
+        // MediaCodec embed needs this overlay independently of whether DV passthrough is allowed.
+        setDolbyVisionOutputLocked(if (directDolbyVisionAllowed) "direct" else "configured")
       }.onFailure { error ->
         Log.e(TAG, "Could not attach the subtitle overlay Surface", error)
         detachOsdSurfaceLocked()
       }.isSuccess
+    }
+
+  /** Updates the DV route without recreating the OSD Surface (display/preference change). */
+  fun updateOsdDolbyVisionOutput(
+    owner: Any,
+    directDolbyVisionAllowed: Boolean,
+  ): Boolean =
+    withCore(default = false) {
+      if (attachedOsdOwner !== owner) return@withCore false
+      setDolbyVisionOutputLocked(if (directDolbyVisionAllowed) "direct" else "configured")
+      true
     }
 
   fun resizeOsdSurface(
