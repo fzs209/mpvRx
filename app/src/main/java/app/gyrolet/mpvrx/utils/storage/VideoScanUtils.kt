@@ -73,12 +73,14 @@ object VideoScanUtils : KoinComponent {
     forceFileSystemCheck: Boolean = false,
   ): List<Video> =
     withContext(Dispatchers.IO) {
+      val scanStartMs = System.currentTimeMillis()
       val normalizedFolderPath = normalizeStoragePath(folderPath) ?: return@withContext emptyList()
       val videosMap = mutableMapOf<String, Video>()
       val noMediaPathFilter = NoMediaPathFilter(options)
       val folder = File(normalizedFolderPath)
 
       if (noMediaPathFilter.shouldExcludeDirectory(folder)) {
+        Log.d(TAG, "ScanDiag: videos for $normalizedFolderPath source=excluded-nomedia count=0")
         return@withContext emptyList()
       }
 
@@ -138,17 +140,32 @@ object VideoScanUtils : KoinComponent {
 
       // Manual refreshes force a filesystem verification pass so new/deleted files are reflected
       // even before MediaStore catches up.
+      var fileSystemRan = false
       if (
         !app.gyrolet.mpvrx.BuildConfig.SCOPED_STORAGE_ONLY &&
         folder.exists() &&
         folder.canRead() &&
         shouldRunFilesystemVideoCheck(forceFileSystemCheck, videosMap.size)
       ) {
+        fileSystemRan = true
         scanVideosFromFileSystem(context, folder, videosMap, options, noMediaPathFilter, keyResolver)
       }
 
-      videosMap.values.filter(options::includesVideo)
-        .sortedBy { it.displayName.lowercase(Locale.getDefault()) }
+      val result =
+        videosMap.values.filter(options::includesVideo)
+          .sortedBy { it.displayName.lowercase(Locale.getDefault()) }
+      val source =
+        when {
+          indexedVideos != null -> "index"
+          fileSystemRan -> "mediastore+filesystem"
+          else -> "mediastore"
+        }
+      Log.d(
+        TAG,
+        "ScanDiag: videos for $normalizedFolderPath source=$source force=$forceFileSystemCheck " +
+          "count=${result.size} totalMs=${System.currentTimeMillis() - scanStartMs}",
+      )
+      result
     }
 
   /** Builds [Video] rows from the tree index's retained MediaStore rows for one folder. */

@@ -213,6 +213,7 @@ object TreeViewScanner {
 
       cachedTreeViewData?.let { cached ->
         if (!forceFileSystemCheck && now - cacheTimestamp < CACHE_TTL_MS && cacheOptionsKey == cacheKey) {
+          Log.d(TAG, "ScanDiag: tree source=memory nodes=${cached.size} ageMs=${now - cacheTimestamp}")
           return@withContext cached
         }
       }
@@ -221,6 +222,11 @@ object TreeViewScanner {
       // MediaStore matches the generation it was built from, so restore it instead of walking again.
       if (!forceFileSystemCheck) {
         restoreTreeViewData(context, cacheKey)?.let { restored ->
+          Log.d(
+            TAG,
+            "ScanDiag: tree source=exact-snapshot nodes=${restored.size} " +
+              "legacyRows=${restored.hasNodesWithoutVideoRows()}",
+          )
           cachedTreeViewData = restored
           cacheTimestamp = now
           cacheOptionsKey = cacheKey
@@ -249,6 +255,11 @@ object TreeViewScanner {
         // tree built with these scan options now and rebuild the exact one in the background, so
         // reopening stays instant and the NEW badges catch up shortly after.
         restoreTreeViewData(context, baseCacheKey(options, showNewLabels, thresholdDays))?.let { stale ->
+          Log.d(
+            TAG,
+            "ScanDiag: tree source=stale-snapshot-basekey nodes=${stale.size} " +
+              "legacyRows=${stale.hasNodesWithoutVideoRows()}",
+          )
           cachedTreeViewData = stale
           cacheTimestamp = now
           cacheOptionsKey = cacheKey
@@ -275,6 +286,11 @@ object TreeViewScanner {
             ?: restoreStaleTreeViewData(context, cacheKey)
             ?: restoreStaleTreeViewData(context, baseCacheKey(options, showNewLabels, thresholdDays))
         if (staleTree != null) {
+          Log.d(
+            TAG,
+            "ScanDiag: tree source=stale-fallback nodes=${staleTree.size} " +
+              "legacyRows=${staleTree.hasNodesWithoutVideoRows()}",
+          )
           cachedTreeViewData = staleTree
           cacheTimestamp = now
           cacheOptionsKey = cacheKey
@@ -292,6 +308,7 @@ object TreeViewScanner {
         }
       }
 
+      Log.d(TAG, "ScanDiag: tree source=sync-build force=$forceFileSystemCheck")
       buildAndPersist(
         context = context,
         options = options,
@@ -323,12 +340,30 @@ object TreeViewScanner {
     folderPath: String,
     options: MediaScanOptions,
   ): List<VideoInfo>? {
-    val tree = cachedTreeViewData ?: return null
-    if (cachedTreeOptions != options) return null
+    val tree = cachedTreeViewData
+    if (tree == null) {
+      Log.d(TAG, "ScanDiag: index decline for $folderPath - no tree in memory")
+      return null
+    }
+    if (cachedTreeOptions != options) {
+      Log.d(TAG, "ScanDiag: index decline for $folderPath - options mismatch")
+      return null
+    }
     val normalizedFolderPath = normalizeStoragePath(folderPath) ?: return null
     val folderKey = storagePathKey(normalizedFolderPath) ?: return null
-    val node = tree[folderKey] ?: return null
-    if (node.directVideos.isEmpty() && node.directVideoCount > 0) return null
+    val node = tree[folderKey]
+    if (node == null) {
+      Log.d(TAG, "ScanDiag: index decline for $folderPath - no node in tree")
+      return null
+    }
+    if (node.directVideos.isEmpty() && node.directVideoCount > 0) {
+      Log.d(
+        TAG,
+        "ScanDiag: index decline for $folderPath - node count=${node.directVideoCount} but no rows (legacy)",
+      )
+      return null
+    }
+    Log.d(TAG, "ScanDiag: index hit for $folderPath - ${node.directVideos.size} rows")
     return node.directVideos
   }
 
@@ -392,6 +427,7 @@ object TreeViewScanner {
     val observedGeneration =
       if (forceFileSystemCheck) null else MediaStoreGenerationGuard.currentToken(context)
 
+    val buildStartMs = System.currentTimeMillis()
     val data =
       buildTreeViewData(
         context = context,
@@ -413,9 +449,19 @@ object TreeViewScanner {
     if (payload != null) {
       TreeViewCache.save(context, cacheKey, payload)
       TreeViewCache.save(context, baseCacheKey(options, showNewLabels, thresholdDays), payload)
+      Log.d(
+        TAG,
+        "ScanDiag: tree built nodes=${data.size} buildMs=${System.currentTimeMillis() - buildStartMs} " +
+          "persisted generation=$observedGeneration",
+      )
     } else {
       // No generation to prove it fresh, so there is nothing worth keeping.
       TreeViewCache.clear(context)
+      Log.d(
+        TAG,
+        "ScanDiag: tree built nodes=${data.size} buildMs=${System.currentTimeMillis() - buildStartMs} " +
+          "but NOT persisted (no generation token); snapshot cleared",
+      )
     }
     return data
   }
@@ -431,8 +477,15 @@ object TreeViewScanner {
     context: Context,
     cacheKey: String,
   ): Map<String, FolderNode>? {
-    val payload = TreeViewCache.load(context, cacheKey) ?: return null
-    if (!MediaStoreGenerationGuard.isSnapshotCurrent(context, payload)) return null
+    val payload = TreeViewCache.load(context, cacheKey)
+    if (payload == null) {
+      Log.d(TAG, "ScanDiag: snapshot miss (nothing persisted for this key)")
+      return null
+    }
+    if (!MediaStoreGenerationGuard.isSnapshotCurrent(context, payload)) {
+      Log.d(TAG, "ScanDiag: snapshot rejected - MediaStore generation has moved on")
+      return null
+    }
     return decodeTreeViewData(payload)
   }
 
