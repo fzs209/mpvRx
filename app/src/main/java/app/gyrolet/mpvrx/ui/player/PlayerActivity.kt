@@ -1346,8 +1346,13 @@ class PlayerActivity :
           decoderPreferences.dolbyVisionDirect.changes(),
           decoderPreferences.mediaCodecEmbed.changes(),
         ) { dolbyVisionDirect, mediaCodecEmbed ->
-          DolbyVisionDirect.wantsOsdOverlay(dolbyVisionDirect, mediaCodecEmbed)
-        }.distinctUntilChanged().collect { player.setOsdOverlay(it) }
+          dolbyVisionDirect to mediaCodecEmbed
+        }.distinctUntilChanged().collect { (dolbyVisionDirect, mediaCodecEmbed) ->
+          player.setOsdOverlay(DolbyVisionDirect.wantsOsdOverlay(dolbyVisionDirect, mediaCodecEmbed))
+          // Embed keeps the overlay attached when the direct-output preference changes. Refresh
+          // the actual DV route separately so that this setting can never be inferred from OSD.
+          player.refreshDolbyVisionDirectOutput()
+        }
       }
       lifecycleScope.launch {
         repeatOnLifecycle(Lifecycle.State.STARTED) {
