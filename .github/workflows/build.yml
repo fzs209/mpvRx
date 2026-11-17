@@ -3,7 +3,7 @@ name: CI/CD Build
 on:
   push:
     branches:
-      - master
+      - fix/fongmi-legacy-gpu-osd-crash
   pull_request:
   workflow_dispatch:
 
