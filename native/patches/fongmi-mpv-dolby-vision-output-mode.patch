@@ -35,20 +35,7 @@ index 29acd79..0000000 100644
      bool gpu_dovi_mapping = supports_gpu_dovi_mapping(ctx);
      set_decoder_avopts(vd->log, avctx, lavc_param->avopts,
                         native_dovi_sink, gpu_dovi_mapping);
-diff --git a/player/video.c b/player/video.c
-index 4a00000..0000000 100644
---- a/player/video.c
-+++ b/player/video.c
-@@ -431,7 +431,6 @@ bool should_use_android_dolby_vision_direct_output(struct MPContext *mpctx,
- bool is_android_dolby_vision_direct_output_active(struct MPContext *mpctx)
- {
--    return mpctx->video_out &&
--           (mpctx->video_out->driver->caps & VO_CAP_NATIVE_DOVI);
-+    return mpctx->video_out && mpctx->video_out->native_dovi_sink;
- }
- 
- #if HAVE_ANDROID
-@@ -510,6 +509,14 @@ static bool reinit_video_chain_internal(struct MPContext *mpctx,
+@@ -510,6 +510,14 @@ static bool reinit_video_chain_internal(struct MPContext *mpctx,
          mpctx->mouse_cursor_visible = true;
      }
  
