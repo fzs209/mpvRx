@@ -16,6 +16,8 @@ import android.provider.MediaStore
 import android.util.Log
 import app.gyrolet.mpvrx.ui.player.PlaybackIdentity
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.async
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
@@ -45,6 +47,10 @@ object TreeViewScanner {
   // Revalidates a stale snapshot off the UI path; each exact key is refreshed by one job at a time.
   private val treeRefreshScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
   private val refreshingKeys = ConcurrentHashMap.newKeySet<String>()
+
+  // Builds currently running, keyed by cache key + force flag. Guarded by buildLock.
+  private val buildLock = Any()
+  private val inFlightBuilds = HashMap<String, Deferred<Map<String, FolderNode>>>()
 
   fun clearCache() {
     cachedTreeViewData = null
@@ -309,7 +315,7 @@ object TreeViewScanner {
       }
 
       Log.d(TAG, "ScanDiag: tree source=sync-build force=$forceFileSystemCheck")
-      buildAndPersist(
+      buildCoalesced(
         context = context,
         options = options,
         forceFileSystemCheck = forceFileSystemCheck,
@@ -380,7 +386,7 @@ object TreeViewScanner {
     if (!refreshingKeys.add(cacheKey)) return
     treeRefreshScope.launch {
       try {
-        buildAndPersist(
+        buildCoalesced(
           context = context,
           options = options,
           forceFileSystemCheck = false,
@@ -411,6 +417,67 @@ object TreeViewScanner {
     return decodeTreeViewData(payload)
   }
 
+  /**
+   * Runs [buildAndPersist] at most once per (cache key, force flag) at a time. A full tree
+   * build is the browser's most expensive operation and the MediaStore provider serialises
+   * it, so concurrent callers - rapid navigation where every open forces a build, or a folder
+   * opened while a background refresh is rebuilding the same tree - must join the build
+   * already in flight instead of each running their own: a burst of about ten concurrent
+   * builds measured 26-34 s apiece where a single build takes ~2 s, and every folder query
+   * queued behind them. The build runs on [treeRefreshScope] so one caller going away cannot
+   * cancel it for the others. Forced and unforced builds are keyed separately because their
+   * results differ (forced builds add filesystem-supplement nodes).
+   */
+  private suspend fun buildCoalesced(
+    context: Context,
+    options: MediaScanOptions,
+    forceFileSystemCheck: Boolean,
+    cacheKey: String,
+    playedMediaTitles: Set<String>,
+    showNewLabels: Boolean,
+    thresholdDays: Int,
+    newLabelOverrides: Map<String, Boolean>,
+  ): Map<String, FolderNode> {
+    val buildKey = cacheKey + if (forceFileSystemCheck) "|force" else "|normal"
+    val (deferred, started) =
+      synchronized(buildLock) {
+        val existing = inFlightBuilds[buildKey]
+        if (existing != null) {
+          existing to false
+        } else {
+          val created =
+            treeRefreshScope.async {
+              buildAndPersist(
+                context = context,
+                options = options,
+                forceFileSystemCheck = forceFileSystemCheck,
+                cacheKey = cacheKey,
+                playedMediaTitles = playedMediaTitles,
+                showNewLabels = showNewLabels,
+                thresholdDays = thresholdDays,
+                newLabelOverrides = newLabelOverrides,
+              )
+            }
+          inFlightBuilds[buildKey] = created
+          created.invokeOnCompletion {
+            synchronized(buildLock) {
+              if (inFlightBuilds[buildKey] === created) inFlightBuilds.remove(buildKey)
+            }
+          }
+          created to true
+        }
+      }
+    Log.d(
+      TAG,
+      if (started) {
+        "ScanDiag: tree build started force=$forceFileSystemCheck"
+      } else {
+        "ScanDiag: tree build joined in-flight force=$forceFileSystemCheck"
+      },
+    )
+    return deferred.await()
+  }
+
   /** Builds a tree from the current library and persists it under both the exact and the base key. */
   private suspend fun buildAndPersist(
     context: Context,
@@ -423,9 +490,12 @@ object TreeViewScanner {
     newLabelOverrides: Map<String, Boolean>,
   ): Map<String, FolderNode> {
     // Read before building: recording the generation afterwards would bless a MediaStore newer
-    // than the data, and the next cold boot would keep a stale tree.
-    val observedGeneration =
-      if (forceFileSystemCheck) null else MediaStoreGenerationGuard.currentToken(context)
+    // than the data, and the next cold boot would keep a stale tree. Forced builds read it too:
+    // they used to skip the token, which made the payload below null and the else branch CLEAR
+    // the persisted snapshot, so every manual refresh deleted the cold-start fast path and the
+    // next launch paid a full synchronous build. Reading the token before the build keeps the
+    // same safety property for both paths - it can only understate how fresh the data is.
+    val observedGeneration = MediaStoreGenerationGuard.currentToken(context)
 
     val buildStartMs = System.currentTimeMillis()
     val data =
