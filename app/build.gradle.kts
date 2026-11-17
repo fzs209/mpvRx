@@ -352,7 +352,7 @@ androidComponents {
           .find { it.filterType == FilterConfiguration.FilterType.ABI }
           ?.identifier
 
-      if (isUniversalOnly && abi != null) {
+      if (isUniversalOnly && abi != null && targetAbiProp.isNullOrBlank()) {
         output.enabled.set(false)
       }
 
