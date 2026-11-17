@@ -10,14 +10,11 @@
 package app.gyrolet.mpvrx.utils.storage
 
 import android.content.Context
-import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
 import android.util.Log
 import app.gyrolet.mpvrx.ui.player.PlaybackIdentity
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Deferred
-import kotlinx.coroutines.async
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
@@ -38,25 +35,16 @@ object TreeViewScanner {
   private var cachedTreeViewData: Map<String, FolderNode>? = null
   private var cacheTimestamp: Long = 0
   private var cacheOptionsKey: String? = null
-
-  // The scan options the cached tree was built with. Indexed video rows are only served to a
-  // caller asking with these exact options, because the build bakes its filters into the rows.
-  private var cachedTreeOptions: MediaScanOptions? = null
   private const val CACHE_TTL_MS = 10_000L
 
   // Revalidates a stale snapshot off the UI path; each exact key is refreshed by one job at a time.
   private val treeRefreshScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
   private val refreshingKeys = ConcurrentHashMap.newKeySet<String>()
 
-  // Builds currently running, keyed by cache key + force flag. Guarded by buildLock.
-  private val buildLock = Any()
-  private val inFlightBuilds = HashMap<String, Deferred<Map<String, FolderNode>>>()
-
   fun clearCache() {
     cachedTreeViewData = null
     cacheTimestamp = 0
     cacheOptionsKey = null
-    cachedTreeOptions = null
   }
 
   data class FolderData(
@@ -70,26 +58,12 @@ object TreeViewScanner {
     val newCount: Int = 0,
   )
 
-  /**
-   * One direct-child media row retained from the tree build's MediaStore pass. The build query
-   * already reads these fields for its aggregates; keeping the rows lets a folder's video list be
-   * served from the same index instead of a second, per-folder MediaStore query on the
-   * navigation path. [mediaId] is -1 for rows the filesystem supplement found (not indexed).
-   */
-  data class VideoInfo(
+  private data class VideoInfo(
     val displayName: String,
     val filePath: String,
     val size: Long,
     val duration: Long,
     val dateModified: Long,
-    val mediaId: Long = -1L,
-    val dateAdded: Long = 0L,
-    val width: Int = 0,
-    val height: Int = 0,
-    val mimeType: String = "",
-    val rotation: Int = 0,
-    val isAudio: Boolean = false,
-    val title: String = "",
   )
 
   private data class FolderAggregate(
@@ -112,7 +86,6 @@ object TreeViewScanner {
     var recursiveDuration: Long = 0L,
     var recursiveLastModified: Long = 0L,
     var recursiveNewCount: Int = 0,
-    var directVideos: List<VideoInfo> = emptyList(),
   )
 
   private data class NewBadgeConfig(
@@ -219,7 +192,6 @@ object TreeViewScanner {
 
       cachedTreeViewData?.let { cached ->
         if (!forceFileSystemCheck && now - cacheTimestamp < CACHE_TTL_MS && cacheOptionsKey == cacheKey) {
-          Log.d(TAG, "ScanDiag: tree source=memory nodes=${cached.size} ageMs=${now - cacheTimestamp}")
           return@withContext cached
         }
       }
@@ -228,94 +200,43 @@ object TreeViewScanner {
       // MediaStore matches the generation it was built from, so restore it instead of walking again.
       if (!forceFileSystemCheck) {
         restoreTreeViewData(context, cacheKey)?.let { restored ->
-          Log.d(
-            TAG,
-            "ScanDiag: tree source=exact-snapshot nodes=${restored.size} " +
-              "legacyRows=${restored.hasNodesWithoutVideoRows()}",
-          )
           cachedTreeViewData = restored
           cacheTimestamp = now
           cacheOptionsKey = cacheKey
-          cachedTreeOptions = options
-          // A snapshot written before video rows were retained decodes with counts but no
-          // rows, and getCachedIndexedVideos declines to serve those nodes - so without an
-          // upgrade every folder in this session would fall back to a live per-folder
-          // MediaStore query, and the exact-restore path would keep reviving the legacy
-          // snapshot forever because its generation still matches. Serve it now (folder
-          // lists are unaffected) and rebuild once in the background to rewrite the
-          // snapshot in the current format.
-          if (restored.hasNodesWithoutVideoRows()) {
-            refreshTreeInBackground(
-              context = context,
-              options = options,
-              cacheKey = cacheKey,
-              playedMediaTitles = playedMediaTitles,
-              showNewLabels = showNewLabels,
-              thresholdDays = thresholdDays,
-              newLabelOverrides = newLabelOverrides,
-            )
-          }
           return@withContext restored
         }
         // Played titles and overrides change the exact key without changing the scan. Show the last
         // tree built with these scan options now and rebuild the exact one in the background, so
         // reopening stays instant and the NEW badges catch up shortly after.
         restoreTreeViewData(context, baseCacheKey(options, showNewLabels, thresholdDays))?.let { stale ->
-          Log.d(
-            TAG,
-            "ScanDiag: tree source=stale-snapshot-basekey nodes=${stale.size} " +
-              "legacyRows=${stale.hasNodesWithoutVideoRows()}",
-          )
           cachedTreeViewData = stale
           cacheTimestamp = now
           cacheOptionsKey = cacheKey
-          cachedTreeOptions = options
-          refreshTreeInBackground(
-            context = context,
-            options = options,
-            cacheKey = cacheKey,
-            playedMediaTitles = playedMediaTitles,
-            showNewLabels = showNewLabels,
-            thresholdDays = thresholdDays,
-            newLabelOverrides = newLabelOverrides,
-          )
+          if (refreshingKeys.add(cacheKey)) {
+            treeRefreshScope.launch {
+              try {
+                buildAndPersist(
+                  context = context,
+                  options = options,
+                  forceFileSystemCheck = false,
+                  cacheKey = cacheKey,
+                  playedMediaTitles = playedMediaTitles,
+                  showNewLabels = showNewLabels,
+                  thresholdDays = thresholdDays,
+                  newLabelOverrides = newLabelOverrides,
+                )
+              } catch (error: Exception) {
+                Log.w(TAG, "Could not refresh tree snapshot", error)
+              } finally {
+                refreshingKeys.remove(cacheKey)
+              }
+            }
+          }
           return@withContext stale
-        }
-        // MediaStore has moved on since every snapshot was built, so none of them can be proven
-        // exact, and the checks above all decline. Folder view still shows its last list in that
-        // situation and rescans behind it; do the same here instead of walking the whole volume
-        // on the navigation path. The stale tree is only a stand-in while the background rebuild
-        // runs. With no snapshot at all there is nothing to show, so the build below stays
-        // synchronous for the first ever scan.
-        val staleTree =
-          cachedTreeViewData?.takeIf { cacheOptionsKey == cacheKey }
-            ?: restoreStaleTreeViewData(context, cacheKey)
-            ?: restoreStaleTreeViewData(context, baseCacheKey(options, showNewLabels, thresholdDays))
-        if (staleTree != null) {
-          Log.d(
-            TAG,
-            "ScanDiag: tree source=stale-fallback nodes=${staleTree.size} " +
-              "legacyRows=${staleTree.hasNodesWithoutVideoRows()}",
-          )
-          cachedTreeViewData = staleTree
-          cacheTimestamp = now
-          cacheOptionsKey = cacheKey
-          cachedTreeOptions = options
-          refreshTreeInBackground(
-            context = context,
-            options = options,
-            cacheKey = cacheKey,
-            playedMediaTitles = playedMediaTitles,
-            showNewLabels = showNewLabels,
-            thresholdDays = thresholdDays,
-            newLabelOverrides = newLabelOverrides,
-          )
-          return@withContext staleTree
         }
       }
 
-      Log.d(TAG, "ScanDiag: tree source=sync-build force=$forceFileSystemCheck")
-      buildCoalesced(
+      buildAndPersist(
         context = context,
         options = options,
         forceFileSystemCheck = forceFileSystemCheck,
@@ -326,157 +247,6 @@ object TreeViewScanner {
         newLabelOverrides = newLabelOverrides,
       )
     }
-
-  /**
-   * The retained direct-child media rows for [folderPath] from the tree already in memory, or
-   * null when no tree is cached, the cached tree was built with different [options], or the
-   * folder's node carries counts without rows (a snapshot written before rows were retained).
-   * Never builds or restores anything: callers fall back to a live scan on null, so this can
-   * only ever remove a MediaStore query from the navigation path, never add one.
-   */
-  /**
-   * True when any node carries a direct-media count but no retained rows - the mark of a
-   * snapshot written before rows were kept (or a node the filesystem supplement created
-   * before it kept them). Such a tree displays fine but cannot serve video lists.
-   */
-  private fun Map<String, FolderNode>.hasNodesWithoutVideoRows(): Boolean =
-    values.any { it.directVideoCount > 0 && it.directVideos.isEmpty() }
-
-  fun getCachedIndexedVideos(
-    folderPath: String,
-    options: MediaScanOptions,
-  ): List<VideoInfo>? {
-    val tree = cachedTreeViewData
-    if (tree == null) {
-      Log.d(TAG, "ScanDiag: index decline for $folderPath - no tree in memory")
-      return null
-    }
-    if (cachedTreeOptions != options) {
-      Log.d(TAG, "ScanDiag: index decline for $folderPath - options mismatch")
-      return null
-    }
-    val normalizedFolderPath = normalizeStoragePath(folderPath) ?: return null
-    val folderKey = storagePathKey(normalizedFolderPath) ?: return null
-    val node = tree[folderKey]
-    if (node == null) {
-      Log.d(TAG, "ScanDiag: index decline for $folderPath - no node in tree")
-      return null
-    }
-    if (node.directVideos.isEmpty() && node.directVideoCount > 0) {
-      Log.d(
-        TAG,
-        "ScanDiag: index decline for $folderPath - node count=${node.directVideoCount} but no rows (legacy)",
-      )
-      return null
-    }
-    Log.d(TAG, "ScanDiag: index hit for $folderPath - ${node.directVideos.size} rows")
-    return node.directVideos
-  }
-
-  /** Rebuilds the exact-key tree off the caller's path and swaps it into the cache when done. */
-  private fun refreshTreeInBackground(
-    context: Context,
-    options: MediaScanOptions,
-    cacheKey: String,
-    playedMediaTitles: Set<String>,
-    showNewLabels: Boolean,
-    thresholdDays: Int,
-    newLabelOverrides: Map<String, Boolean>,
-  ) {
-    if (!refreshingKeys.add(cacheKey)) return
-    treeRefreshScope.launch {
-      try {
-        buildCoalesced(
-          context = context,
-          options = options,
-          forceFileSystemCheck = false,
-          cacheKey = cacheKey,
-          playedMediaTitles = playedMediaTitles,
-          showNewLabels = showNewLabels,
-          thresholdDays = thresholdDays,
-          newLabelOverrides = newLabelOverrides,
-        )
-      } catch (error: Exception) {
-        Log.w(TAG, "Could not refresh tree snapshot", error)
-      } finally {
-        refreshingKeys.remove(cacheKey)
-      }
-    }
-  }
-
-  /**
-   * Loads a persisted tree WITHOUT the generation check in [restoreTreeViewData]. Only the
-   * stale-first branch of [getOrBuildTreeViewData] may use this, and only to put the last known
-   * tree on screen while a background rebuild runs; the result must never be treated as exact.
-   */
-  private fun restoreStaleTreeViewData(
-    context: Context,
-    cacheKey: String,
-  ): Map<String, FolderNode>? {
-    val payload = TreeViewCache.load(context, cacheKey) ?: return null
-    return decodeTreeViewData(payload)
-  }
-
-  /**
-   * Runs [buildAndPersist] at most once per (cache key, force flag) at a time. A full tree
-   * build is the browser's most expensive operation and the MediaStore provider serialises
-   * it, so concurrent callers - rapid navigation where every open forces a build, or a folder
-   * opened while a background refresh is rebuilding the same tree - must join the build
-   * already in flight instead of each running their own: a burst of about ten concurrent
-   * builds measured 26-34 s apiece where a single build takes ~2 s, and every folder query
-   * queued behind them. The build runs on [treeRefreshScope] so one caller going away cannot
-   * cancel it for the others. Forced and unforced builds are keyed separately because their
-   * results differ (forced builds add filesystem-supplement nodes).
-   */
-  private suspend fun buildCoalesced(
-    context: Context,
-    options: MediaScanOptions,
-    forceFileSystemCheck: Boolean,
-    cacheKey: String,
-    playedMediaTitles: Set<String>,
-    showNewLabels: Boolean,
-    thresholdDays: Int,
-    newLabelOverrides: Map<String, Boolean>,
-  ): Map<String, FolderNode> {
-    val buildKey = cacheKey + if (forceFileSystemCheck) "|force" else "|normal"
-    val (deferred, started) =
-      synchronized(buildLock) {
-        val existing = inFlightBuilds[buildKey]
-        if (existing != null) {
-          existing to false
-        } else {
-          val created =
-            treeRefreshScope.async {
-              buildAndPersist(
-                context = context,
-                options = options,
-                forceFileSystemCheck = forceFileSystemCheck,
-                cacheKey = cacheKey,
-                playedMediaTitles = playedMediaTitles,
-                showNewLabels = showNewLabels,
-                thresholdDays = thresholdDays,
-                newLabelOverrides = newLabelOverrides,
-              )
-            }
-          inFlightBuilds[buildKey] = created
-          created.invokeOnCompletion {
-            synchronized(buildLock) {
-              if (inFlightBuilds[buildKey] === created) inFlightBuilds.remove(buildKey)
-            }
-          }
-          created to true
-        }
-      }
-    Log.d(
-      TAG,
-      if (started) {
-        "ScanDiag: tree build started force=$forceFileSystemCheck"
-      } else {
-        "ScanDiag: tree build joined in-flight force=$forceFileSystemCheck"
-      },
-    )
-    return deferred.await()
-  }
 
   /** Builds a tree from the current library and persists it under both the exact and the base key. */
   private suspend fun buildAndPersist(
@@ -490,14 +260,10 @@ object TreeViewScanner {
     newLabelOverrides: Map<String, Boolean>,
   ): Map<String, FolderNode> {
     // Read before building: recording the generation afterwards would bless a MediaStore newer
-    // than the data, and the next cold boot would keep a stale tree. Forced builds read it too:
-    // they used to skip the token, which made the payload below null and the else branch CLEAR
-    // the persisted snapshot, so every manual refresh deleted the cold-start fast path and the
-    // next launch paid a full synchronous build. Reading the token before the build keeps the
-    // same safety property for both paths - it can only understate how fresh the data is.
-    val observedGeneration = MediaStoreGenerationGuard.currentToken(context)
+    // than the data, and the next cold boot would keep a stale tree.
+    val observedGeneration =
+      if (forceFileSystemCheck) null else MediaStoreGenerationGuard.currentToken(context)
 
-    val buildStartMs = System.currentTimeMillis()
     val data =
       buildTreeViewData(
         context = context,
@@ -512,26 +278,15 @@ object TreeViewScanner {
     cachedTreeViewData = data
     cacheTimestamp = System.currentTimeMillis()
     cacheOptionsKey = cacheKey
-    cachedTreeOptions = options
     // The snapshot is only trustworthy while MediaStore still matches, so the generation that
     // describes it travels inside the payload. Both are dropped together when the library changes.
     val payload = MediaStoreGenerationGuard.withGeneration(encodeTreeViewData(data), observedGeneration)
     if (payload != null) {
       TreeViewCache.save(context, cacheKey, payload)
       TreeViewCache.save(context, baseCacheKey(options, showNewLabels, thresholdDays), payload)
-      Log.d(
-        TAG,
-        "ScanDiag: tree built nodes=${data.size} buildMs=${System.currentTimeMillis() - buildStartMs} " +
-          "persisted generation=$observedGeneration",
-      )
     } else {
       // No generation to prove it fresh, so there is nothing worth keeping.
       TreeViewCache.clear(context)
-      Log.d(
-        TAG,
-        "ScanDiag: tree built nodes=${data.size} buildMs=${System.currentTimeMillis() - buildStartMs} " +
-          "but NOT persisted (no generation token); snapshot cleared",
-      )
     }
     return data
   }
@@ -547,33 +302,16 @@ object TreeViewScanner {
     context: Context,
     cacheKey: String,
   ): Map<String, FolderNode>? {
-    val payload = TreeViewCache.load(context, cacheKey)
-    if (payload == null) {
-      Log.d(TAG, "ScanDiag: snapshot miss (nothing persisted for this key)")
-      return null
-    }
-    if (!MediaStoreGenerationGuard.isSnapshotCurrent(context, payload)) {
-      Log.d(TAG, "ScanDiag: snapshot rejected - MediaStore generation has moved on")
-      return null
-    }
+    val payload = TreeViewCache.load(context, cacheKey) ?: return null
+    if (!MediaStoreGenerationGuard.isSnapshotCurrent(context, payload)) return null
     return decodeTreeViewData(payload)
   }
-
-  // Same optional-geometry column the per-folder scan uses: ORIENTATION from API 29, the legacy
-  // "rotation" name before it. Providers that reject it are retried without it at query time.
-  private val treeVideoRotationColumn =
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) MediaStore.MediaColumns.ORIENTATION else "rotation"
 
   // ASCII unit/record separators, escaped rather than embedded as literal control characters so the
   // source stays readable. Both are pathological in a path or folder name.
   private const val FIELD_SEPARATOR = "\u001F"
   private const val RECORD_SEPARATOR = "\u001E"
   private const val NODE_FIELD_COUNT = 15
-
-  // Separators for the retained video rows appended to each node record as one extra field.
-  private const val VIDEO_FIELD_SEPARATOR = "\u001C"
-  private const val VIDEO_RECORD_SEPARATOR = "\u001D"
-  private const val VIDEO_FIELD_COUNT = 13
 
   /**
    * Serialises every [FolderNode] field.
@@ -584,73 +322,24 @@ object TreeViewScanner {
    */
   private fun encodeTreeViewData(folders: Map<String, FolderNode>): String =
     folders.entries.joinToString(RECORD_SEPARATOR) { (key, node) ->
-      val nodeFields =
-        listOf(
-          key,
-          node.path,
-          node.name,
-          node.directVideoCount.toString(),
-          node.directSize.toString(),
-          node.directDuration.toString(),
-          node.directLastModified.toString(),
-          node.directNewCount.toString(),
-          node.hasDirectSubfolders.toString(),
-          node.isFlattened.toString(),
-          node.recursiveVideoCount.toString(),
-          node.recursiveSize.toString(),
-          node.recursiveDuration.toString(),
-          node.recursiveLastModified.toString(),
-          node.recursiveNewCount.toString(),
-        ).joinToString(FIELD_SEPARATOR) { sanitizeField(it) }
-      // The rows blob is appended unsanitised as a whole: its fields are sanitised one by one
-      // and its own separators are distinct from the node-level ones.
-      nodeFields + FIELD_SEPARATOR + encodeVideoRows(node.directVideos)
-    }
-
-  private fun encodeVideoRows(videos: List<VideoInfo>): String =
-    videos.joinToString(VIDEO_RECORD_SEPARATOR) { video ->
       listOf(
-        video.filePath,
-        video.displayName,
-        video.mediaId.toString(),
-        video.size.toString(),
-        video.duration.toString(),
-        video.dateModified.toString(),
-        video.dateAdded.toString(),
-        video.width.toString(),
-        video.height.toString(),
-        video.mimeType,
-        video.rotation.toString(),
-        video.isAudio.toString(),
-        video.title,
-      ).joinToString(VIDEO_FIELD_SEPARATOR) { sanitizeField(it) }
+        key,
+        node.path,
+        node.name,
+        node.directVideoCount.toString(),
+        node.directSize.toString(),
+        node.directDuration.toString(),
+        node.directLastModified.toString(),
+        node.directNewCount.toString(),
+        node.hasDirectSubfolders.toString(),
+        node.isFlattened.toString(),
+        node.recursiveVideoCount.toString(),
+        node.recursiveSize.toString(),
+        node.recursiveDuration.toString(),
+        node.recursiveLastModified.toString(),
+        node.recursiveNewCount.toString(),
+      ).joinToString(FIELD_SEPARATOR) { sanitizeField(it) }
     }
-
-  private fun decodeVideoRows(blob: String): List<VideoInfo>? {
-    if (blob.isBlank()) return emptyList()
-    val videos = mutableListOf<VideoInfo>()
-    for (record in blob.split(VIDEO_RECORD_SEPARATOR)) {
-      val parts = record.split(VIDEO_FIELD_SEPARATOR)
-      if (parts.size != VIDEO_FIELD_COUNT) return null
-      videos +=
-        VideoInfo(
-          filePath = parts[0],
-          displayName = parts[1],
-          mediaId = parts[2].toLongOrNull() ?: return null,
-          size = parts[3].toLongOrNull() ?: return null,
-          duration = parts[4].toLongOrNull() ?: return null,
-          dateModified = parts[5].toLongOrNull() ?: return null,
-          dateAdded = parts[6].toLongOrNull() ?: return null,
-          width = parts[7].toIntOrNull() ?: return null,
-          height = parts[8].toIntOrNull() ?: return null,
-          mimeType = parts[9],
-          rotation = parts[10].toIntOrNull() ?: return null,
-          isAudio = parts[11].toBooleanStrictOrNull() ?: return null,
-          title = parts[12],
-        )
-    }
-    return videos
-  }
 
   /** Returns null when the payload is unreadable, so the caller rebuilds rather than showing junk. */
   private fun decodeTreeViewData(payload: String): Map<String, FolderNode>? {
@@ -667,15 +356,7 @@ object TreeViewScanner {
 
   private fun decodeTreeNode(record: String): Pair<String, FolderNode>? {
     val parts = record.split(FIELD_SEPARATOR)
-    // Snapshots written before video rows were retained have no 16th field; they still decode,
-    // with empty rows, and getCachedIndexedVideos declines to serve those nodes.
-    if (parts.size != NODE_FIELD_COUNT && parts.size != NODE_FIELD_COUNT + 1) return null
-    val directVideos =
-      if (parts.size == NODE_FIELD_COUNT + 1) {
-        decodeVideoRows(parts[NODE_FIELD_COUNT]) ?: return null
-      } else {
-        emptyList()
-      }
+    if (parts.size != NODE_FIELD_COUNT) return null
     val directVideoCount = parts[3].toIntOrNull() ?: return null
     val directSize = parts[4].toLongOrNull() ?: return null
     val directDuration = parts[5].toLongOrNull() ?: return null
@@ -705,7 +386,6 @@ object TreeViewScanner {
         recursiveDuration = recursiveDuration,
         recursiveLastModified = recursiveLastModified,
         recursiveNewCount = recursiveNewCount,
-        directVideos = directVideos,
       )
   }
 
@@ -713,8 +393,6 @@ object TreeViewScanner {
     value
       .replace(FIELD_SEPARATOR, " ")
       .replace(RECORD_SEPARATOR, " ")
-      .replace(VIDEO_FIELD_SEPARATOR, " ")
-      .replace(VIDEO_RECORD_SEPARATOR, " ")
       .replace('\n', ' ')
       .replace('\r', ' ')
 
@@ -799,58 +477,29 @@ object TreeViewScanner {
     currentTimeMs: Long,
     options: MediaScanOptions,
   ) {
-    // The extra columns beyond the aggregates (id, geometry, mime, dates, rotation) are the
-    // video-list fields: reading them in this same pass is what lets the rows be retained in
-    // the tree index at zero extra query cost.
-    val baseProjection =
+    val projection =
       arrayOf(
-        MediaStore.Video.Media._ID,
         MediaStore.Video.Media.DATA,
         MediaStore.Video.Media.DISPLAY_NAME,
         MediaStore.Video.Media.SIZE,
         MediaStore.Video.Media.DURATION,
         MediaStore.Video.Media.DATE_MODIFIED,
-        MediaStore.Video.Media.DATE_ADDED,
-        MediaStore.Video.Media.MIME_TYPE,
-        MediaStore.Video.Media.WIDTH,
-        MediaStore.Video.Media.HEIGHT,
       )
-    val projectionWithRotation = baseProjection + treeVideoRotationColumn
 
     try {
-      fun queryTreeVideos(projection: Array<String>) =
-        context.contentResolver.query(
+      context.contentResolver
+        .query(
           MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
           projection,
           null,
           null,
           null,
-        )
-      val cursor =
-        try {
-          queryTreeVideos(projectionWithRotation)
-        } catch (error: RuntimeException) {
-          // Strict providers reject the optional rotation column; retry without it, mirroring
-          // the per-folder scan, so the whole tree build is not discarded over one column.
-          if (error !is IllegalArgumentException &&
-            error !is android.database.sqlite.SQLiteException
-          ) {
-            throw error
-          }
-          queryTreeVideos(baseProjection)
-        }
-      cursor?.use { cursor ->
-          val idColumn = cursor.getColumnIndexOrThrow(MediaStore.Video.Media._ID)
+        )?.use { cursor ->
           val dataColumn = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.DATA)
           val displayNameColumn = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.DISPLAY_NAME)
           val sizeColumn = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.SIZE)
           val durationColumn = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.DURATION)
           val dateColumn = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.DATE_MODIFIED)
-          val dateAddedColumn = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.DATE_ADDED)
-          val mimeColumn = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.MIME_TYPE)
-          val widthColumn = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.WIDTH)
-          val heightColumn = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.HEIGHT)
-          val rotationColumn = cursor.getColumnIndex(treeVideoRotationColumn)
 
           val videosByFolder = mutableMapOf<String, FolderAggregate>()
           val folderResolver = MediaFolderResolver(noMediaPathFilter)
@@ -871,13 +520,6 @@ object TreeViewScanner {
             if (aggregate.path != folderPath) {
               aggregate.path = choosePreferredStoragePath(aggregate.path, folderPath)
             }
-            val rawRotation =
-              if (rotationColumn >= 0 && !cursor.isNull(rotationColumn)) {
-                cursor.getInt(rotationColumn)
-              } else {
-                0
-              }
-            val normalizedRotation = ((rawRotation % 360) + 360) % 360
             aggregate.videos.add(
               VideoInfo(
                 displayName = cursor.getString(displayNameColumn) ?: file.name,
@@ -885,13 +527,6 @@ object TreeViewScanner {
                 size = cursor.getLong(sizeColumn),
                 duration = cursor.getLong(durationColumn),
                 dateModified = cursor.getLong(dateColumn),
-                mediaId = cursor.getLong(idColumn),
-                dateAdded = cursor.getLong(dateAddedColumn),
-                width = cursor.getInt(widthColumn),
-                height = cursor.getInt(heightColumn),
-                mimeType = cursor.getString(mimeColumn) ?: "",
-                rotation = if (normalizedRotation % 90 == 0) normalizedRotation else 0,
-                title = file.nameWithoutExtension,
               ),
             )
           }
@@ -940,7 +575,6 @@ object TreeViewScanner {
       directDuration = videos.sumOf { it.duration },
       directLastModified = videos.maxOfOrNull { it.dateModified } ?: 0L,
       directNewCount = newCount,
-      directVideos = videos,
     )
   }
 
@@ -954,15 +588,11 @@ object TreeViewScanner {
   ) {
     val projection =
       arrayOf(
-        MediaStore.Audio.Media._ID,
         MediaStore.Audio.Media.DATA,
         MediaStore.Audio.Media.DISPLAY_NAME,
-        MediaStore.Audio.Media.TITLE,
         MediaStore.Audio.Media.SIZE,
         MediaStore.Audio.Media.DURATION,
         MediaStore.Audio.Media.DATE_MODIFIED,
-        MediaStore.Audio.Media.DATE_ADDED,
-        MediaStore.Audio.Media.MIME_TYPE,
       )
     try {
       context.contentResolver
@@ -973,15 +603,11 @@ object TreeViewScanner {
           null,
           null,
         )?.use { cursor ->
-          val idColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media._ID)
           val dataColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DATA)
           val nameColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DISPLAY_NAME)
-          val titleColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.TITLE)
           val sizeColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.SIZE)
           val durationColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DURATION)
           val dateColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DATE_MODIFIED)
-          val dateAddedColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DATE_ADDED)
-          val mimeColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.MIME_TYPE)
           val audioByFolder = mutableMapOf<String, FolderAggregate>()
           val folderResolver = MediaFolderResolver(noMediaPathFilter)
           val existenceCache = FolderListingExistenceCache()
@@ -1002,12 +628,6 @@ object TreeViewScanner {
                 size = cursor.getLong(sizeColumn),
                 duration = duration,
                 dateModified = cursor.getLong(dateColumn),
-                mediaId = cursor.getLong(idColumn),
-                dateAdded = cursor.getLong(dateAddedColumn),
-                mimeType = cursor.getString(mimeColumn) ?: "",
-                isAudio = true,
-                title = cursor.getString(titleColumn)?.takeIf { it.isNotBlank() }
-                  ?: file.nameWithoutExtension,
               )
           }
 
@@ -1024,7 +644,6 @@ object TreeViewScanner {
                   directDuration += audioNode.directDuration
                   directLastModified = maxOf(directLastModified, audioNode.directLastModified)
                   directNewCount += audioNode.directNewCount
-                  directVideos = directVideos + audioNode.directVideos
                 }
               }
           }
@@ -1120,7 +739,6 @@ object TreeViewScanner {
       val mediaStats = HashMap<File, FileEntryStat>()
       // Decoding duration is the most expensive step; it used to run twice per audio file.
       val audioDurations = HashMap<File, Long>()
-      val mediaDurations = HashMap<File, Long>()
       val subdirectories = mutableListOf<File>()
 
       for (file in files) {
@@ -1145,7 +763,6 @@ object TreeViewScanner {
                 if (options.includesMedia(stat.size, duration, isAudio)) {
                   mediaFiles.add(file)
                   mediaStats[file] = stat
-                  mediaDurations[file] = duration
                   if (isAudio) audioDurations[file] = duration
                 }
               }
@@ -1186,21 +803,6 @@ object TreeViewScanner {
               directLastModified = (mediaFiles.maxOfOrNull { mediaStats.getValue(it).lastModifiedMs } ?: 0L) / 1000L,
               directNewCount = directNewCount,
               hasDirectSubfolders = subdirectories.isNotEmpty(),
-              // Rows found only on the filesystem have no MediaStore id; the video list
-              // builder falls back to a file URI and path-derived id for them.
-              directVideos =
-                mediaFiles.map { file ->
-                  val stat = mediaStats.getValue(file)
-                  VideoInfo(
-                    displayName = file.name,
-                    filePath = file.absolutePath,
-                    size = stat.size,
-                    duration = mediaDurations[file] ?: 0L,
-                    dateModified = stat.lastModifiedMs / 1000L,
-                    isAudio = FileTypeUtils.isAudioFile(file),
-                    title = file.nameWithoutExtension,
-                  )
-                },
             )
         } else {
           existingNode.path = choosePreferredStoragePath(existingNode.path, folderPath)
