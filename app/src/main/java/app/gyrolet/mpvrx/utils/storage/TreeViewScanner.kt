@@ -225,6 +225,24 @@ object TreeViewScanner {
           cacheTimestamp = now
           cacheOptionsKey = cacheKey
           cachedTreeOptions = options
+          // A snapshot written before video rows were retained decodes with counts but no
+          // rows, and getCachedIndexedVideos declines to serve those nodes - so without an
+          // upgrade every folder in this session would fall back to a live per-folder
+          // MediaStore query, and the exact-restore path would keep reviving the legacy
+          // snapshot forever because its generation still matches. Serve it now (folder
+          // lists are unaffected) and rebuild once in the background to rewrite the
+          // snapshot in the current format.
+          if (restored.hasNodesWithoutVideoRows()) {
+            refreshTreeInBackground(
+              context = context,
+              options = options,
+              cacheKey = cacheKey,
+              playedMediaTitles = playedMediaTitles,
+              showNewLabels = showNewLabels,
+              thresholdDays = thresholdDays,
+              newLabelOverrides = newLabelOverrides,
+            )
+          }
           return@withContext restored
         }
         // Played titles and overrides change the exact key without changing the scan. Show the last
@@ -293,6 +311,14 @@ object TreeViewScanner {
    * Never builds or restores anything: callers fall back to a live scan on null, so this can
    * only ever remove a MediaStore query from the navigation path, never add one.
    */
+  /**
+   * True when any node carries a direct-media count but no retained rows - the mark of a
+   * snapshot written before rows were kept (or a node the filesystem supplement created
+   * before it kept them). Such a tree displays fine but cannot serve video lists.
+   */
+  private fun Map<String, FolderNode>.hasNodesWithoutVideoRows(): Boolean =
+    values.any { it.directVideoCount > 0 && it.directVideos.isEmpty() }
+
   fun getCachedIndexedVideos(
     folderPath: String,
     options: MediaScanOptions,
