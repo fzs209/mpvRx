@@ -197,6 +197,23 @@ jobs:
           python3 -m pip install --upgrade pip
           python3 -m pip install --upgrade meson jinja2 jsonschema
 
+      - name: Remove nested duplicate SDK copy from the runner image
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The ubuntu-24.04 runner image ships a recursively nested duplicate of its
+          # preinstalled SDK ($ANDROID_HOME/sdk/sdk/sdk/...). Every SDK scan in this job
+          # warns about each package twice ("inconsistent location", then "Skipping
+          # duplicate") and parses slower: ci.sh install symlinks $ANDROID_HOME into
+          # mpvlib as its SDK and download-sdk.sh runs sdkmanager against it, and the
+          # Gradle APK build scans it again later. Each nested package is a skipped
+          # duplicate of the canonical one the builds actually use, so removing the
+          # nested copy once, before the first scan, is safe.
+          if [[ -d "$ANDROID_HOME/sdk" ]]; then
+            echo "Removing nested SDK duplicate at $ANDROID_HOME/sdk"
+            sudo rm -rf "$ANDROID_HOME/sdk"
+          fi
+
       - name: Download and restore native dependencies
         working-directory: mpvlib
         run: |
@@ -321,20 +338,6 @@ jobs:
           if [[ "$missing" -ne 0 ]]; then
             echo "Configure all required signing secrets before running the release build."
             exit 1
-          fi
-
-      - name: Remove nested duplicate SDK copy from the runner image
-        shell: bash
-        run: |
-          set -euo pipefail
-          # The ubuntu-24.04 runner image ships a recursively nested duplicate of its
-          # preinstalled SDK ($ANDROID_HOME/sdk/sdk/sdk/...). AGP's SDK scan warns about
-          # every package twice ("inconsistent location", then "Skipping duplicate")
-          # and parses slower. Each nested package is a skipped duplicate of the
-          # canonical one the build actually uses, so removing the nested copy is safe.
-          if [[ -d "$ANDROID_HOME/sdk" ]]; then
-            echo "Removing nested SDK duplicate at $ANDROID_HOME/sdk"
-            sudo rm -rf "$ANDROID_HOME/sdk"
           fi
 
       - name: Build FongMi release APK with patched mpvlib
