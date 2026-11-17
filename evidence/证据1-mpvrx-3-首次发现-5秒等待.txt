@@ -1,0 +1,60 @@
+==============================================================================
+证据 1 —— 首次发现（来源： mpvrx-3.txt，2026-11-18 04:14，诊断功能加入前的构建）
+场景：退出 VID_20261021_230652 后立刻点开 VID_20261021_230621。
+看什么：
+  * 等待从约 04:14:38.7 开始，到 04:14:43.721 才出现兜底日志
+    "Video Surface not attached yet; loading with video selection deferred to attachment"
+    ——整整 5 秒耗在加载前的 Surface 等待上；
+  * 兜底放行后文件很快加载完并开始播放，文件和核心都不慢。
+注：摘录自原始日志的时间窗，已剔除 mpv 属性读写刷屏与系统框架噪声行；
+    所有状态变化行（绑定/封存/等待/超时/事件）完整保留，全量日志另存。
+==============================================================================
+
+11-18 04:14:38.109 14387 17439 V mpv     : event: video-reconfig
+11-18 04:14:38.110 14387 17439 V mpv     : [vo/mediacodec_embed:v] reconfig to 960x540 mediacodec bt.601/bt.709/srgb/limited/display CL=mpeg1/jpeg
+11-18 04:14:38.111 14387 14387 D PlaybackSession: Video suspended before Surface change: generation=17, savedVid=1, vid=no
+11-18 04:14:38.111 14387 17439 V mpv     : event: video-reconfig
+11-18 04:14:38.118 14387 17439 V mpv     : event: video-reconfig
+11-18 04:14:38.130 14387 14387 D mpvrx   : PlayerActivity onDestroy
+11-18 04:14:38.133 14387 14387 D mpvrx   : Background playback service stop already requested
+11-18 04:14:38.154 14387 17439 V mpv     : event: audio-reconfig
+11-18 04:14:38.155 14387 17439 V mpv     : event: end-file
+11-18 04:14:38.157 14387 17439 V mpv     : event: audio-reconfig
+11-18 04:14:38.157 14387 17439 V mpv     : event: idle
+11-18 04:14:38.636 14387 14423 D mpvrx   : Using cached MPV user assets for startup
+11-18 04:14:38.644 14387 14387 D mpvrx   : MPV core prepared in 7 ms
+11-18 04:14:38.644 14387 14387 D mpvrx   : MPV initialized
+11-18 04:14:38.663 14387 14387 D mpvrx   : Deferring video restoration until the playback surface is ready
+11-18 04:14:38.665 14387 14387 D mpvrx   : Deferring video restoration until the playback surface is ready
+11-18 04:14:38.679 14387 14387 D PlaybackSession: Video suspended before Surface change: generation=18, savedVid=null, vid=no
+11-18 04:14:38.679 14387 14387 D PlaybackSession: Android Surface attached; waiting for native window: generation=18, phase=IDLE, size=1316x2832
+11-18 04:14:38.699 14387 14387 D mpvrx   : Deferring video restoration until the playback surface is ready
+11-18 04:14:43.721 14387 14433 W mpvrx   : Video Surface not attached yet; loading with video selection deferred to attachment
+11-18 04:14:43.724 14387 17439 V mpv     : event: start-file
+11-18 04:14:43.751 14387 17439 V mpv     : [cplayer:v] Opening done: /storage/emulated/0/DCIM/Camera/VID_20261021_230621.mp4
+11-18 04:14:43.751 14387 17439 V mpv     : event: audio-reconfig
+11-18 04:14:43.753 14387 17439 V mpv     : event: audio-reconfig
+11-18 04:14:43.760 14387 17439 V mpv     : [vo/mediacodec_embed/osd-overlay:v] Initialized 1316x2832 transparent OSD surface.
+11-18 04:14:43.760 14387 17439 V mpv     : [vo/mediacodec_embed:v] reconfig to 960x540 mediacodec bt.601/bt.709/srgb/limited/display CL=mpeg1/jpeg
+11-18 04:14:43.761 14387 17439 V mpv     : event: video-reconfig
+11-18 04:14:43.761 14387 17439 V mpv     : event: file-loaded
+11-18 04:14:43.773 14387 17439 V mpv     : event: audio-reconfig
+11-18 04:14:43.775 14387 17371 D PlaybackSession: Android renderer ready: generation=19, wid=7670
+11-18 04:14:43.905 14387 17439 V mpv     : event: video-reconfig
+11-18 04:14:44.085 14387 17439 V mpv     : [cplayer:info] VO: [mediacodec_embed] 3840x2160 mediacodec
+11-18 04:14:44.085 14387 17439 V mpv     : [vo/mediacodec_embed:v] reconfig to 3840x2160 mediacodec bt.709/bt.709/bt.1886/limited/display CL=mpeg1/jpeg crop=3840x2160+0+0 rot=90 A=none
+11-18 04:14:44.086 14387 17439 V mpv     : [vo/mediacodec_embed:v] Window size: 1316x2832 (Borders: l=0 t=0 r=0 b=0)
+11-18 04:14:44.086 14387 17439 V mpv     : event: video-reconfig
+11-18 04:14:44.087 14387 17439 V mpv     : [vo/mediacodec_embed:v] Video source: 3840x2160 (1:1)
+11-18 04:14:44.087 14387 17439 V mpv     : [vo/mediacodec_embed:v] Video display: (0, 0) 3840x2160 -> (0, 1046) 1316x740
+11-18 04:14:44.087 14387 17439 V mpv     : [vo/mediacodec_embed:v] Video scale: 0.342708/0.342593
+11-18 04:14:44.087 14387 17439 V mpv     : [vo/mediacodec_embed:v] OSD borders: l=0 t=1046 r=0 b=1046
+11-18 04:14:44.087 14387 17439 V mpv     : [vo/mediacodec_embed:v] Video borders: l=0 t=1046 r=0 b=1046
+11-18 04:14:44.087 14387 17439 V mpv     : [vo/mediacodec_embed:warn] Video is flagged as rotated by 90 degrees, but the video output does not support this.
+11-18 04:14:44.087 14387 17439 V mpv     : [vo/mediacodec_embed:v] Window size: 1316x2832 (Borders: l=0 t=0 r=0 b=0)
+11-18 04:14:44.087 14387 17439 V mpv     : [vo/mediacodec_embed:v] Video source: 3840x2160 (1:1)
+11-18 04:14:44.087 14387 17439 V mpv     : [vo/mediacodec_embed:v] Video display: (0, 0) 3840x2160 -> (0, 1046) 1316x740
+11-18 04:14:44.088 14387 17439 V mpv     : [vo/mediacodec_embed:v] Video scale: 0.342708/0.342593
+11-18 04:14:44.088 14387 17439 V mpv     : [vo/mediacodec_embed:v] OSD borders: l=0 t=1046 r=0 b=1046
+11-18 04:14:44.088 14387 17439 V mpv     : [vo/mediacodec_embed:v] Video borders: l=0 t=1046 r=0 b=1046
+11-18 04:14:44.233 14387 17365 D mpvrx   : Saved recently played (playlist): /storage/emulated/0/DCIM/Camera/VID_20261021_230621.mp4

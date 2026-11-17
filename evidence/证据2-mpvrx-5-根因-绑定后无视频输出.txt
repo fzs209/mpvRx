@@ -1,0 +1,82 @@
+==============================================================================
+证据 2 —— 根因窗口（来源： mpvrx-5.txt，2026-11-18 05:03，带 SurfaceDiag 诊断的构建，全量 logcat）
+场景：连续快速打开多个视频，最后一个（VID_20261028_182302.mp4）卡住。
+看什么：
+  * 新 Surface 在启动后约 53 毫秒就交付并绑定（"Android Surface attached ... phase=IDLE"）；
+  * 之后每秒一条 "waiting for surface ...: surface bound but renderer not ready"，
+    直到 "surface wait timed out after 5065 ms" —— 五秒全花在"已绑定但 renderer 未就绪"；
+  * 超时兜底加载后约 95 毫秒就出现 "Android renderer ready" —— 输出是被加载"喂"出来的。
+后半段附同日志内一次秒开的绑定（05:02:54）作对照：绑定后几毫秒内 renderer 就就绪。
+注：摘录自原始日志的时间窗，已剔除 mpv 属性读写刷屏与系统框架噪声行；
+    所有状态变化行（绑定/封存/等待/超时/事件）完整保留，全量日志另存。
+==============================================================================
+
+11-18 05:03:06.653  7387  7494 D mpvrx   : Using cached MPV user assets for startup
+11-18 05:03:06.660  7387  7387 D mpvrx   : MPV core prepared in 6 ms
+11-18 05:03:06.660  7387  7387 D mpvrx   : MPV initialized
+11-18 05:03:06.678  7387  7387 D mpvrx   : Deferring video restoration until the playback surface is ready
+11-18 05:03:06.680  7387  7387 D mpvrx   : Deferring video restoration until the playback surface is ready
+11-18 05:03:06.694  7387  7387 D mpvrx   : SurfaceDiag: render surface available 1316x2832 valid=true attachedToWindow=true windowVisibility=0
+11-18 05:03:06.695  7387  7387 D PlaybackSession: Video suspended before Surface change: generation=86, savedVid=null, vid=no
+11-18 05:03:06.695  7387  7387 D PlaybackSession: Android Surface attached; waiting for native window: generation=86, phase=IDLE, size=1316x2832
+11-18 05:03:06.703  7387  7480 D mpvrx   : SurfaceDiag: waiting for surface (33 ms): surface bound but renderer not ready
+11-18 05:03:06.716  7387  7387 D mpvrx   : Deferring video restoration until the playback surface is ready
+11-18 05:03:07.707  7387  7486 D mpvrx   : SurfaceDiag: waiting for surface (1037 ms): surface bound but renderer not ready
+11-18 05:03:08.714  7387  7486 D mpvrx   : SurfaceDiag: waiting for surface (2045 ms): surface bound but renderer not ready
+11-18 05:03:09.722  7387  7486 D mpvrx   : SurfaceDiag: waiting for surface (3052 ms): surface bound but renderer not ready
+11-18 05:03:10.729  7387  7486 D mpvrx   : SurfaceDiag: waiting for surface (4059 ms): surface bound but renderer not ready
+11-18 05:03:11.735  7387  7480 W mpvrx   : SurfaceDiag: surface wait timed out after 5065 ms; last reason: surface bound but renderer not ready
+11-18 05:03:11.735  7387  7480 W mpvrx   : Video Surface not attached yet; loading with video selection deferred to attachment
+11-18 05:03:11.741  7387  7980 V mpv     : event: start-file
+11-18 05:03:11.776  7387  7980 V mpv     : [cplayer:v] Opening done: /storage/emulated/0/DCIM/Camera/VID_20261028_182302.mp4
+11-18 05:03:11.777  7387  7980 V mpv     : event: audio-reconfig
+11-18 05:03:11.780  7387  7980 V mpv     : event: audio-reconfig
+11-18 05:03:11.791  7387  7980 V mpv     : [vo/mediacodec_embed/osd-overlay:v] Initialized 1316x2832 transparent OSD surface.
+11-18 05:03:11.791  7387  7980 V mpv     : [vo/mediacodec_embed:v] reconfig to 960x540 mediacodec bt.601/bt.709/srgb/limited/display CL=mpeg1/jpeg
+11-18 05:03:11.791  7387  7980 V mpv     : event: video-reconfig
+11-18 05:03:11.792  7387  7980 V mpv     : event: file-loaded
+11-18 05:03:11.833  7387  7980 V mpv     : event: audio-reconfig
+11-18 05:03:11.836  7387  7480 D PlaybackSession: Android renderer ready: generation=87, wid=9690
+11-18 05:03:12.005  7387  7980 V mpv     : [cplayer:info] VO: [mediacodec_embed] 1280x720 mediacodec
+11-18 05:03:12.005  7387  7980 V mpv     : [vo/mediacodec_embed:v] reconfig to 1280x720 mediacodec bt.2020-ncl/bt.2020/hlg/limited/hlg CL=mpeg1/jpeg crop=1280x720+0+0 rot=90 A=none
+11-18 05:03:12.005  7387  7980 V mpv     : [vo/mediacodec_embed:v] Window size: 1316x2832 (Borders: l=0 t=0 r=0 b=0)
+11-18 05:03:12.005  7387  7980 V mpv     : [vo/mediacodec_embed:v] Video source: 1280x720 (1:1)
+11-18 05:03:12.005  7387  7980 V mpv     : [vo/mediacodec_embed:v] Video display: (0, 0) 1280x720 -> (0, 1046) 1316x740
+11-18 05:03:12.005  7387  7980 V mpv     : event: video-reconfig
+11-18 05:03:12.005  7387  7980 V mpv     : [vo/mediacodec_embed:v] Video scale: 1.028125/1.027778
+11-18 05:03:12.005  7387  7980 V mpv     : [vo/mediacodec_embed:v] OSD borders: l=0 t=1046 r=0 b=1046
+11-18 05:03:12.005  7387  7980 V mpv     : [vo/mediacodec_embed:v] Video borders: l=0 t=1046 r=0 b=1046
+11-18 05:03:12.005  7387  7980 V mpv     : [vo/mediacodec_embed:warn] Video is flagged as rotated by 90 degrees, but the video output does not support this.
+11-18 05:03:12.006  7387  7980 V mpv     : [vo/mediacodec_embed:v] Window size: 1316x2832 (Borders: l=0 t=0 r=0 b=0)
+11-18 05:03:12.006  7387  7980 V mpv     : [vo/mediacodec_embed:v] Video source: 1280x720 (1:1)
+11-18 05:03:12.006  7387  7980 V mpv     : [vo/mediacodec_embed:v] Video display: (0, 0) 1280x720 -> (0, 1046) 1316x740
+11-18 05:03:12.006  7387  7980 V mpv     : [vo/mediacodec_embed:v] Video scale: 1.028125/1.027778
+11-18 05:03:12.007  7387  7980 V mpv     : [vo/mediacodec_embed:v] OSD borders: l=0 t=1046 r=0 b=1046
+11-18 05:03:12.007  7387  7980 V mpv     : [vo/mediacodec_embed:v] Video borders: l=0 t=1046 r=0 b=1046
+11-18 05:03:12.022  7387  7980 V mpv     : event: video-reconfig
+11-18 05:03:12.059  7387  7420 D mpvrx   : Saved recently played (playlist): /storage/emulated/0/DCIM/Camera/VID_20261028_182302.mp4
+
+------------------------------ 对照：同日志内的秒开绑定 ------------------------------
+
+11-18 05:02:54.287  7387  7387 D mpvrx   : SurfaceDiag: render surface destroyed
+11-18 05:02:54.307  7387  7980 V mpv     : event: video-reconfig
+11-18 05:02:54.308  7387  7980 V mpv     : [vo/mediacodec_embed:v] reconfig to 960x540 mediacodec bt.601/bt.709/srgb/limited/display CL=mpeg1/jpeg
+11-18 05:02:54.308  7387  7980 V mpv     : event: video-reconfig
+11-18 05:02:54.308  7387  7387 D PlaybackSession: Video suspended before Surface change: generation=60, savedVid=1, vid=no
+11-18 05:02:54.314  7387  7980 V mpv     : event: video-reconfig
+11-18 05:02:54.328  7387  7387 D mpvrx   : PlayerActivity onDestroy
+11-18 05:02:54.332  7387  7387 D mpvrx   : Background playback service stop already requested
+11-18 05:02:54.353  7387  7980 V mpv     : event: audio-reconfig
+11-18 05:02:54.353  7387  7980 V mpv     : event: end-file
+11-18 05:02:54.358  7387  7980 V mpv     : event: audio-reconfig
+11-18 05:02:54.358  7387  7980 V mpv     : event: idle
+11-18 05:02:54.432  7387  7420 D mpvrx   : Using cached MPV user assets for startup
+11-18 05:02:54.441  7387  7387 D mpvrx   : MPV core prepared in 9 ms
+11-18 05:02:54.441  7387  7387 D mpvrx   : MPV initialized
+11-18 05:02:54.461  7387  7387 D mpvrx   : Deferring video restoration until the playback surface is ready
+11-18 05:02:54.463  7387  7387 D mpvrx   : Deferring video restoration until the playback surface is ready
+11-18 05:02:54.477  7387  7387 D mpvrx   : SurfaceDiag: render surface available 1316x2832 valid=true attachedToWindow=true windowVisibility=0
+11-18 05:02:54.478  7387  7387 D PlaybackSession: Video suspended before Surface change: generation=61, savedVid=null, vid=no
+11-18 05:02:54.478  7387  7387 D PlaybackSession: Android Surface attached; waiting for native window: generation=61, phase=IDLE, size=1316x2832
+11-18 05:02:54.485  7387  7480 D mpvrx   : SurfaceDiag: waiting for surface (33 ms): surface bound but renderer not ready
+11-18 05:02:54.513  7387  7387 D mpvrx   : Deferring video restoration until the playback surface is ready
