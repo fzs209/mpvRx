@@ -816,7 +816,9 @@ internal fun userScriptsNeedReload(currentKey: String): Boolean {
         MPVLib.setPropertyString("android-osd-surface-size", "${width}x$height")
         attachedOsdOwner = owner
         // MediaCodec embed needs this overlay independently of whether DV passthrough is allowed.
-        setDolbyVisionOutputLocked(if (directDolbyVisionAllowed) "direct" else "configured")
+        // Enforce the renderer invariant here as a final guard; callers cannot accidentally opt in.
+        val allowDirect = directDolbyVisionAllowed && desiredVideoOutput != MediaCodecEmbed.VO
+        setDolbyVisionOutputLocked(if (allowDirect) "direct" else "configured")
       }.onFailure { error ->
         Log.e(TAG, "Could not attach the subtitle overlay Surface", error)
         detachOsdSurfaceLocked()
@@ -830,7 +832,8 @@ internal fun userScriptsNeedReload(currentKey: String): Boolean {
   ): Boolean =
     withCore(default = false) {
       if (attachedOsdOwner !== owner) return@withCore false
-      setDolbyVisionOutputLocked(if (directDolbyVisionAllowed) "direct" else "configured")
+      val allowDirect = directDolbyVisionAllowed && desiredVideoOutput != MediaCodecEmbed.VO
+      setDolbyVisionOutputLocked(if (allowDirect) "direct" else "configured")
       true
     }
 
