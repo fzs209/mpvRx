@@ -820,8 +820,9 @@ internal fun userScriptsNeedReload(currentKey: String): Boolean {
     nativeLock.withLock { _state.value.surfaceAttached && attachedSurfaceOwner === owner }
 
   /**
-   * Attaches the transparent overlay that carries subtitles and OSD (FongMi build). Dolby Vision
-   * tracks then go straight to MediaCodec on the video Surface; mpv keeps other tracks on the GPU.
+   * Attaches the transparent overlay that carries subtitles and OSD (FongMi build). The overlay
+   * is also used by mediacodec_embed, but attaching it must not implicitly enable Dolby Vision
+   * passthrough: that output mode is controlled by the separate user preference.
    */
   fun bindOsdSurface(
     surface: Surface,
@@ -838,7 +839,7 @@ internal fun userScriptsNeedReload(currentKey: String): Boolean {
         DolbyVisionDirect.attachOsdSurface(surface)
         MPVLib.setPropertyString("android-osd-surface-size", "${width}x$height")
         attachedOsdOwner = owner
-        setDolbyVisionOutputLocked("direct")
+        setDolbyVisionOutputLocked(if (decoderPreferences.dolbyVisionDirect.get()) "direct" else "configured")
       }.onFailure { error ->
         Log.e(TAG, "Could not attach the subtitle overlay Surface", error)
         detachOsdSurfaceLocked()
@@ -857,6 +858,19 @@ internal fun userScriptsNeedReload(currentKey: String): Boolean {
     }
 
   fun isOsdSurfaceAttachedTo(owner: Any): Boolean = nativeLock.withLock { attachedOsdOwner === owner }
+
+  /**
+   * Applies the Dolby Vision passthrough preference independently from the OSD overlay.
+   * Direct output is only selected while the overlay Surface is attached; mediacodec_embed can
+   * keep using that overlay for subtitles/OSD with Dolby Vision passthrough disabled.
+   */
+  fun setDolbyVisionDirectEnabled(enabled: Boolean) {
+    if (!DolbyVisionDirect.isBuildSupported) return
+    withCore(Unit) {
+      val output = if (enabled && attachedOsdOwner != null) "direct" else "configured"
+      setDolbyVisionOutputLocked(output)
+    }
+  }
 
   /**
    * FongMi build: the cover picture mpv found in the playing file. Audio plays without a selected
