@@ -430,19 +430,22 @@ object DecoderPreferencesScreen : Screen {
                   shouldUseTextureRendering(liquidGlass, hdrOutput, liquidGlassInHdr, mediaCodecEmbed)
                 SwitchPreference(
                   modifier = Modifier.settingsSearchTarget(R.string.pref_decoder_dolby_vision_direct_title),
-                  // MediaCodec embed already sends every video, Dolby Vision included, straight to the screen.
-                  value = dolbyVisionDirect || mediaCodecEmbed,
-                  enabled = !dolbyVisionConfigOwned && !mediaCodecEmbed,
+                  // MediaCodec embed owns the OSD overlay, but Dolby Vision passthrough remains an independent choice.
+                  value = dolbyVisionDirect,
+                  enabled = !dolbyVisionConfigOwned,
                   onValueChange = { preferences.dolbyVisionDirect.set(it) },
                   title = { Text(stringResource(R.string.pref_decoder_dolby_vision_direct_title)) },
                   summary = {
                     Column {
+                      Text(
+                        stringResource(R.string.pref_decoder_dolby_vision_direct_summary),
+                        color = MaterialTheme.colorScheme.outline,
+                      )
                       if (mediaCodecEmbed) {
-                        MediaCodecEmbedNote(R.string.pref_decoder_mediacodec_embed_forced_on)
-                      } else {
                         Text(
-                          stringResource(R.string.pref_decoder_dolby_vision_direct_summary),
+                          stringResource(R.string.pref_decoder_dolby_vision_direct_embed_note),
                           color = MaterialTheme.colorScheme.outline,
+                          style = MaterialTheme.typography.bodySmall,
                         )
                       }
                       if (dolbyVisionDirect && textureRendering) {
