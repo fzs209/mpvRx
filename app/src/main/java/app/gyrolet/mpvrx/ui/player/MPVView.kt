@@ -809,11 +809,15 @@ class MPVView(
   private fun shouldUseDirectDolbyVisionOutput(): Boolean {
     val support = AndroidDisplayHdrCapabilities.query(display)
     val requested = decoderPreferences.dolbyVisionDirect.get()
-    val allowed = DolbyVisionDirect.canUseDirectOutput(requested, support)
+    // Check both the persisted preference and the actual configured output. This closes the
+    // transition window while the core is being recreated for a renderer change.
+    val mediaCodecEmbed =
+      decoderPreferences.mediaCodecEmbed.get() || PlaybackSession.videoOutput == MediaCodecEmbed.VO
+    val allowed = DolbyVisionDirect.canUseDirectOutput(requested, mediaCodecEmbed, support)
     val signature =
-      "display=${display?.displayId},requested=$requested,known=${support.known}," +
-        "dv=${support.dolbyVision},hdr10=${support.hdr10},hdr10Plus=${support.hdr10Plus}," +
-        "hlg=${support.hlg},allowed=$allowed"
+      "display=${display?.displayId},requested=$requested,embed=$mediaCodecEmbed," +
+        "known=${support.known},dv=${support.dolbyVision},hdr10=${support.hdr10}," +
+        "hdr10Plus=${support.hdr10Plus},hlg=${support.hlg},allowed=$allowed"
     if (signature != lastDolbyVisionOutputDecision) {
       lastDolbyVisionOutputDecision = signature
       Log.i(TAG, "Dolby Vision direct output decision: $signature")
