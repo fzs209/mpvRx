@@ -82,11 +82,26 @@ object VideoScanUtils : KoinComponent {
         return@withContext emptyList()
       }
 
-      // Try MediaStore first (fast)
       val keyResolver = MediaPathKeyResolver()
-      scanVideosFromMediaStore(context, normalizedFolderPath, videosMap, noMediaPathFilter, keyResolver)
-      if (options.includeAudio) {
-        scanAudioFromMediaStore(context, normalizedFolderPath, videosMap, noMediaPathFilter, options, keyResolver)
+      // Indexed fast path: when the tree index is already in memory (scanDirectory builds or
+      // restores it immediately before asking for this folder's videos), serve the retained
+      // rows and skip the per-folder MediaStore query entirely - on a cold provider that
+      // query is the multi-second stall behind opening a folder. A manual refresh
+      // (forceFileSystemCheck) and any cache/options mismatch fall back to the live scans.
+      val indexedVideos =
+        if (forceFileSystemCheck) {
+          null
+        } else {
+          TreeViewScanner.getCachedIndexedVideos(normalizedFolderPath, options)
+        }
+      if (indexedVideos != null) {
+        addIndexedVideos(indexedVideos, normalizedFolderPath, options, videosMap, keyResolver)
+      } else {
+        // Try MediaStore first (fast)
+        scanVideosFromMediaStore(context, normalizedFolderPath, videosMap, noMediaPathFilter, keyResolver)
+        if (options.includeAudio) {
+          scanAudioFromMediaStore(context, normalizedFolderPath, videosMap, noMediaPathFilter, options, keyResolver)
+        }
       }
       for (video in UnindexedVideoDiscovery.videos(options, normalizedFolderPath)) {
         val key = keyResolver.key(video.path) ?: continue
@@ -135,6 +150,60 @@ object VideoScanUtils : KoinComponent {
       videosMap.values.filter(options::includesVideo)
         .sortedBy { it.displayName.lowercase(Locale.getDefault()) }
     }
+
+  /** Builds [Video] rows from the tree index's retained MediaStore rows for one folder. */
+  private fun addIndexedVideos(
+    indexed: List<TreeViewScanner.VideoInfo>,
+    normalizedFolderPath: String,
+    options: MediaScanOptions,
+    videosMap: MutableMap<String, Video>,
+    keyResolver: MediaPathKeyResolver,
+  ) {
+    for (info in indexed) {
+      if (info.isAudio && !options.includeAudio) continue
+      val normalizedPath = normalizeStoragePath(info.filePath) ?: continue
+      val file = File(normalizedPath)
+      // Rows were existence-checked when the tree was built; re-check cheaply so a file
+      // deleted since then does not linger until the background rebuild lands.
+      if (!app.gyrolet.mpvrx.BuildConfig.SCOPED_STORAGE_ONLY && !file.exists()) continue
+      val uri =
+        when {
+          info.mediaId >= 0L && info.isAudio ->
+            Uri.withAppendedPath(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, info.mediaId.toString())
+          info.mediaId >= 0L ->
+            Uri.withAppendedPath(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, info.mediaId.toString())
+          else -> Uri.fromFile(file)
+        }
+      videosMap[keyResolver.key(normalizedPath) ?: normalizedPath] =
+        Video(
+          id = if (info.mediaId >= 0L) info.mediaId else normalizedPath.hashCode().toLong(),
+          title = info.title.ifBlank { file.nameWithoutExtension },
+          displayName = info.displayName.ifBlank { file.name },
+          path = normalizedPath,
+          uri = uri,
+          duration = info.duration,
+          durationFormatted = formatDuration(info.duration),
+          size = info.size,
+          sizeFormatted = formatFileSize(info.size),
+          dateModified = info.dateModified,
+          dateAdded = info.dateAdded,
+          mimeType =
+            info.mimeType.ifBlank {
+              FileTypeUtils.getMimeTypeFromExtension(file.extension.lowercase())
+            },
+          bucketId = normalizedFolderPath,
+          bucketDisplayName = leafStorageName(normalizedFolderPath),
+          width = if (info.isAudio) 0 else info.width,
+          height = if (info.isAudio) 0 else info.height,
+          rotation = info.rotation,
+          fps = 0f,
+          resolution = if (info.isAudio) "--" else formatResolution(info.width, info.height),
+          hasEmbeddedSubtitles = false,
+          subtitleCodec = "",
+          isAudio = info.isAudio,
+        )
+    }
+  }
 
   /**
    * Scan videos from MediaStore
