@@ -236,7 +236,6 @@ internal fun AutoEqHeadphonePickerSheet(onDismissRequest: () -> Unit) {
       LazyColumn(Modifier.fillMaxWidth().heightIn(max = 360.dp).selectableGroup()) {
         items(matches.orEmpty(), key = { it.url }) { entry ->
           ListItem(
-            headlineContent = { Text(entry.name, maxLines = 2, overflow = TextOverflow.Ellipsis) },
             supportingContent = { Text(entry.measurementSource) },
             trailingContent = { RadioButton(selected = profile?.entry?.url == entry.url, onClick = null, enabled = !loading) },
             colors = ListItemDefaults.colors(containerColor = Color.Transparent),
@@ -264,7 +263,9 @@ internal fun AutoEqHeadphonePickerSheet(onDismissRequest: () -> Unit) {
                 }
               },
             ),
-          )
+          ) {
+            Text(entry.name, maxLines = 2, overflow = TextOverflow.Ellipsis)
+          }
         }
       }
     }

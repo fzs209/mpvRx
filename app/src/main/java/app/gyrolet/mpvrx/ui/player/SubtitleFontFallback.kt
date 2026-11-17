@@ -128,6 +128,9 @@ internal class SubtitleGlyphCoverage {
       Character.UnicodeBlock.BYZANTINE_MUSICAL_SYMBOLS,
       Character.UnicodeBlock.ANCIENT_GREEK_MUSICAL_NOTATION,
       -> FallbackFontNeed.Music
+      // UnicodeBlock.of returns null for code points with no block; they took the Symbols
+      // fall-through before, and the compiler wants the null case named explicitly.
+      null -> FallbackFontNeed.Symbols
       else -> FallbackFontNeed.Symbols
     }
 

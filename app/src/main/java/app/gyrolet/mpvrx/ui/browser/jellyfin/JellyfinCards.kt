@@ -1705,7 +1705,7 @@ fun JellyfinEpisodeCard(
 ) {
   val hasOwnImage = !item.primaryImageTag.isNullOrBlank()
   val fallbackSeriesImage = !hasOwnImage && !item.seriesId.isNullOrBlank() && !item.seriesPrimaryImageTag.isNullOrBlank()
-  val imageItemId = if (fallbackSeriesImage) item.seriesId!! else item.id
+  val imageItemId = if (fallbackSeriesImage) item.seriesId else item.id
   val imageTag = if (fallbackSeriesImage) item.seriesPrimaryImageTag else item.primaryImageTag
 
   val imageUrl =
