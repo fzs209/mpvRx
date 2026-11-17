@@ -91,6 +91,8 @@ class MPVView(
   private var renderCallbacksEnabled = false
   private var surfaceRecovery: Runnable? = null
   private var pausedFrameRedraw: Runnable? = null
+  private var lastDolbyVisionOutputDecision: String? = null
+  private var lastProfile8FallbackStatus: String? = null
   private val surfaceReadiness = MutableStateFlow(false)
   /** Prevent glass from sampling a new renderer before the native video output is ready. */
   internal val surfaceReady: StateFlow<Boolean> = surfaceReadiness.asStateFlow()
@@ -635,6 +637,7 @@ class MPVView(
     pendingStartupShaders = null
 
     if (FongMiMpv.isBuildSupported) {
+      applyProfile8Hdr10Fallback()
       PlaybackSession.loadManagedUserScripts(
         MpvScriptAssets.autoloadEntries(context.filesDir),
         advancedPreferences.mpvConfStorageUri.get(),
@@ -785,10 +788,92 @@ class MPVView(
 
   private fun ensureOsdSurfaceAttached() {
     val surface = osdSurface ?: return
-    if (isExiting || !surfaceBindingEnabled || !renderCallbacksEnabled || !surface.isValid ||
-      PlaybackSession.isOsdSurfaceAttachedTo(this)
-    ) return
-    PlaybackSession.bindOsdSurface(surface, osdSurfaceWidth, osdSurfaceHeight, owner = this)
+    if (isExiting || !surfaceBindingEnabled || !renderCallbacksEnabled || !surface.isValid) return
+
+    val directDolbyVisionAllowed = shouldUseDirectDolbyVisionOutput()
+    if (PlaybackSession.isOsdSurfaceAttachedTo(this)) {
+      PlaybackSession.updateOsdDolbyVisionOutput(this, directDolbyVisionAllowed)
+      return
+    }
+    PlaybackSession.bindOsdSurface(
+      surface,
+      osdSurfaceWidth,
+      osdSurfaceHeight,
+      owner = this,
+      directDolbyVisionAllowed = directDolbyVisionAllowed,
+    )
+  }
+
+  private fun shouldUseDirectDolbyVisionOutput(): Boolean {
+    val support = AndroidDisplayHdrCapabilities.query(display)
+    val requested = decoderPreferences.dolbyVisionDirect.get()
+    val allowed = DolbyVisionDirect.canUseDirectOutput(requested, support)
+    val signature =
+      "display=${display?.displayId},requested=$requested,known=${support.known}," +
+        "dv=${support.dolbyVision},hdr10=${support.hdr10},hdr10Plus=${support.hdr10Plus}," +
+        "hlg=${support.hlg},allowed=$allowed"
+    if (signature != lastDolbyVisionOutputDecision) {
+      lastDolbyVisionOutputDecision = signature
+      Log.i(TAG, "Dolby Vision direct output decision: $signature")
+    }
+    return allowed
+  }
+
+  /**
+   * Re-evaluates the active display policy. Called when the preference or display mode changes,
+   * even if MediaCodec embed keeps the same OSD overlay attached.
+   */
+  internal fun refreshDolbyVisionDirectOutput() {
+    if (isExiting || !FongMiMpv.isBuildSupported) return
+    ensureOsdSurfaceAttached()
+    applyProfile8Hdr10Fallback()
+  }
+
+  /**
+   * Newer FongMi native builds may expose a P8-specific HDR10 base-layer fallback. Probe the
+   * option instead of sending it blindly: the bundled 1.1.8.x native libraries do not all carry
+   * this option, and an unknown mpv option must not break player initialization.
+   *
+   * This option is distinct from demuxer-dovi-profile7; the latter does not affect Profile 8.1.
+   */
+  private fun applyProfile8Hdr10Fallback() {
+    if (!FongMiMpv.isBuildSupported) return
+    val support = AndroidDisplayHdrCapabilities.query(display)
+    if (!support.known) {
+      logProfile8FallbackStatus("Display HDR capabilities are unknown; P8.1 fallback was not forced")
+      return
+    }
+    if (support.dolbyVision) {
+      logProfile8FallbackStatus("Display supports Dolby Vision; native P8.1 handling remains unchanged")
+      return
+    }
+    if (!support.hdr10) {
+      logProfile8FallbackStatus("Display does not advertise HDR10; P8.1 HDR10 fallback is unavailable")
+      return
+    }
+    if (MpvConfigOverridePolicy.isOwnedByMpvConf("demuxer-dovi-profile8")) {
+      logProfile8FallbackStatus("demuxer-dovi-profile8 is controlled by mpv.conf; preserving that setting")
+      return
+    }
+
+    val nativeMode = PlaybackSession.getPropertyString("options/demuxer-dovi-profile8")
+    if (nativeMode == null) {
+      logProfile8FallbackStatus(
+        "Native mpv does not expose demuxer-dovi-profile8; P8.1 RPU fallback is unavailable in this build",
+      )
+      return
+    }
+
+    PlaybackSession.setPropertyString("demuxer-dovi-profile8", "hdr10")
+    logProfile8FallbackStatus(
+      "Enabled demuxer-dovi-profile8=hdr10 for an HDR10 display (HDR10+=${support.hdr10Plus})",
+    )
+  }
+
+  private fun logProfile8FallbackStatus(message: String) {
+    if (lastProfile8FallbackStatus == message) return
+    lastProfile8FallbackStatus = message
+    Log.i(TAG, "Dolby Vision Profile 8.1 compatibility: $message")
   }
 
   override fun onOsdSurfaceAvailable(surface: Surface, width: Int, height: Int) {
@@ -871,7 +956,9 @@ class MPVView(
       override fun onDisplayRemoved(displayId: Int) = Unit
 
       override fun onDisplayChanged(displayId: Int) {
-        if (displayId != Display.DEFAULT_DISPLAY || isExiting || !isMotionInterpolationRunning()) return
+        if (isExiting) return
+        if (displayId == display?.displayId) refreshDolbyVisionDirectOutput()
+        if (displayId != Display.DEFAULT_DISPLAY || !isMotionInterpolationRunning()) return
         MotionInterpolation.displayFpsOverride(context)?.let {
           PlaybackSession.setOptionString("display-fps-override", it)
         }
@@ -880,13 +967,14 @@ class MPVView(
 
   override fun onAttachedToWindow() {
     super.onAttachedToWindow()
-    if (MotionInterpolation.isBuildSupported) {
+    if (MotionInterpolation.isBuildSupported || DolbyVisionDirect.isBuildSupported) {
       context.getSystemService(DisplayManager::class.java)?.registerDisplayListener(displayListener, handler)
     }
+    refreshDolbyVisionDirectOutput()
   }
 
   override fun onDetachedFromWindow() {
-    if (MotionInterpolation.isBuildSupported) {
+    if (MotionInterpolation.isBuildSupported || DolbyVisionDirect.isBuildSupported) {
       context.getSystemService(DisplayManager::class.java)?.unregisterDisplayListener(displayListener)
     }
     super.onDetachedFromWindow()
