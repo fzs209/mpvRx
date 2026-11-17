@@ -64,6 +64,27 @@ jobs:
       - name: Make Gradle wrapper executable
         run: chmod +x ./gradlew
 
+      - name: Validate release signing secrets
+        shell: bash
+        env:
+          SIGNING_KEYSTORE: ${{ secrets.SIGNING_KEYSTORE }}
+          SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+          SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in SIGNING_KEYSTORE SIGNING_KEY_ALIAS SIGNING_STORE_PASSWORD KEY_PASSWORD; do
+            if [[ -z "${!name}" ]]; then
+              echo "::error title=Missing signing secret::$name is not configured in repository Actions secrets."
+              missing=1
+            fi
+          done
+          if [[ "$missing" -ne 0 ]]; then
+            echo "Configure all required signing secrets before running the release build."
+            exit 1
+          fi
+
       - name: Build release APKs
         if: ${{ matrix.distribution.package == 'apk' }}
         shell: bash
@@ -131,18 +152,20 @@ jobs:
 
           test -x "$apksigner"
 
-          if [[ -z "$SIGNING_KEYSTORE" ]]; then
-            echo "SIGNING_KEYSTORE is unavailable (expected for untrusted fork PRs); keeping CI APKs unsigned."
-            exit 0
-          fi
-
-          if [[ -z "$SIGNING_KEY_ALIAS" || -z "$SIGNING_STORE_PASSWORD" || -z "$KEY_PASSWORD" ]]; then
-            echo "SIGNING_KEYSTORE exists but one or more required signing secrets are missing."
-            exit 1
-          fi
+          for name in SIGNING_KEYSTORE SIGNING_KEY_ALIAS SIGNING_STORE_PASSWORD KEY_PASSWORD; do
+            if [[ -z "${!name}" ]]; then
+              echo "::error title=Missing signing secret::$name is not configured."
+              exit 1
+            fi
+          done
 
           printf '%s' "$SIGNING_KEYSTORE" | base64 --decode > release.keystore
           trap 'rm -f release.keystore' EXIT
+
+          # Fail before touching APKs if the uploaded keystore, password or alias is invalid.
+          keytool -list -keystore release.keystore \
+            -storepass "$SIGNING_STORE_PASSWORD" \
+            -alias "$SIGNING_KEY_ALIAS" >/dev/null
 
           # AGP only appends "-unsigned" when the variant has no signing config, so accept
           # either name and always re-sign with the release key.
