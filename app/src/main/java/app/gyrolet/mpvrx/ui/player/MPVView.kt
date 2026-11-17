@@ -167,10 +167,11 @@ class MPVView(
         }
         return attached
       }
-      // Idle fast-path: with the Surface bound but the core idle and nothing loaded, no
-      // video output exists for the activation loop to observe, so readiness can only
-      // follow a load. Once that state has held for the grace period, stop waiting and
-      // let the caller take its deferred-selection load (which creates the output).
+      // Idle fast-path (safety net): readiness normally follows as soon as bindSurface
+      // has applied wid, without waiting for a load or a video output. If a bind cannot
+      // complete (wid never becomes observable) while the core sits idle with nothing
+      // loaded, stop waiting once that state has held for the grace period and let the
+      // caller take its deferred-selection load instead of burning the full timeout.
       val now = SystemClock.elapsedRealtime()
       if (idleBound) {
         if (idleBoundSince == 0L) idleBoundSince = now
