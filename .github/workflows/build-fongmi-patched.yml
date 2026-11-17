@@ -197,21 +197,27 @@ jobs:
           python3 -m pip install --upgrade pip
           python3 -m pip install --upgrade meson jinja2 jsonschema
 
-      - name: Remove nested duplicate SDK copy from the runner image
+      - name: Remove stale SDK symlink restored from cache
         shell: bash
         run: |
           set -euo pipefail
-          # The ubuntu-24.04 runner image ships a recursively nested duplicate of its
-          # preinstalled SDK ($ANDROID_HOME/sdk/sdk/sdk/...). Every SDK scan in this job
-          # warns about each package twice ("inconsistent location", then "Skipping
-          # duplicate") and parses slower: ci.sh install symlinks $ANDROID_HOME into
-          # mpvlib as its SDK and download-sdk.sh runs sdkmanager against it, and the
-          # Gradle APK build scans it again later. Each nested package is a skipped
-          # duplicate of the canonical one the builds actually use, so removing the
-          # nested copy once, before the first scan, is safe.
-          if [[ -d "$ANDROID_HOME/sdk" ]]; then
-            echo "Removing nested SDK duplicate at $ANDROID_HOME/sdk"
-            sudo rm -rf "$ANDROID_HOME/sdk"
+          # The SDK cache above restores mpvlib/buildscripts/sdk/ from a previous run,
+          # including the android-sdk-linux symlink an earlier ci.sh install created
+          # there. When this run's ci.sh executes `ln -sf $ANDROID_HOME
+          # sdk/android-sdk-linux` against that restored symlink-to-a-directory, ln
+          # dereferences it and creates the new link INSIDE the real SDK instead:
+          # $ANDROID_HOME/sdk pointing back at $ANDROID_HOME, a self-referential
+          # loop. Every sdkmanager and Gradle scan then reports each package twice
+          # ("inconsistent location", then "Skipping duplicate" - about 2000 warnings
+          # per job). Removing the restored symlink lets ci.sh recreate it cleanly.
+          if [[ -L mpvlib/buildscripts/sdk/android-sdk-linux ]]; then
+            echo "Removing restored SDK symlink so ci.sh can recreate it cleanly"
+            rm -f mpvlib/buildscripts/sdk/android-sdk-linux
+          fi
+          # Belt and braces: drop the loop itself if one is somehow already present.
+          if [[ -L "$ANDROID_HOME/sdk" ]]; then
+            echo "Removing SDK self-loop at $ANDROID_HOME/sdk"
+            sudo rm -f "$ANDROID_HOME/sdk"
           fi
 
       - name: Download and restore native dependencies
