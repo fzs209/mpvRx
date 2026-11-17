@@ -27,11 +27,21 @@ internal object DolbyVisionDirect {
   val isBuildSupported: Boolean
     get() = BuildConfig.MPV_SUPPORTS_DOLBY_VISION_DIRECT && attachMethod != null && detachMethod != null
 
-  /** The overlay carries subtitles for direct Dolby Vision tracks and for MediaCodec embed. */
+  /** The overlay is a surface concern; it does not itself authorize Dolby Vision passthrough. */
   fun wantsOsdOverlay(
     dolbyVisionDirect: Boolean,
     mediaCodecEmbed: Boolean,
   ): Boolean = isBuildSupported && (dolbyVisionDirect || mediaCodecEmbed)
+
+  /**
+   * Direct output is safe only when the user requested it and the active display explicitly
+   * advertises Dolby Vision. Unknown display capabilities are treated conservatively.
+   */
+  fun canUseDirectOutput(
+    userRequested: Boolean,
+    displaySupport: DisplayHdrSupport,
+  ): Boolean =
+    isBuildSupported && userRequested && displaySupport.known && displaySupport.dolbyVision
 
   fun attachOsdSurface(surface: Surface) {
     attachMethod?.invoke(MPVLib, surface)
