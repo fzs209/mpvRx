@@ -34,6 +34,49 @@ git -C "$MPV_DIR" apply --check "$PATCH_FILE"
 git -C "$MPV_DIR" apply "$PATCH_FILE"
 git -C "$MPV_DIR" diff --check
 
+# The native build recipe carries a gpu-next shader hunk written for a
+# different vo_gpu_next.c implementation. FongMi's pinned mpv uses mppl_video
+# instead, while the csputils.c and video_shaders.c hunks match this revision.
+# Filter only that incompatible file section from the temporary checkout of
+# mpvlibAndroid; leave its repository and the two compatible shader patches
+# untouched.
+SHADER_PATCH="$MPVLIB_DIR/buildscripts/patches/mpv_video_shaders.patch"
+if [[ ! -f "$SHADER_PATCH" ]]; then
+  echo "FongMi shader patch not found: $SHADER_PATCH" >&2
+  exit 1
+fi
+
+python3 - "$SHADER_PATCH" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+patch = Path(sys.argv[1])
+source = patch.read_text(encoding="utf-8")
+sections = re.split(r"(?m)(?=^diff --git )", source)
+kept = []
+removed = 0
+
+for section in sections:
+    if section.startswith("diff --git a/video/out/vo_gpu_next.c b/video/out/vo_gpu_next.c"):
+        removed += 1
+        continue
+    kept.append(section)
+
+if removed != 1:
+    raise SystemExit(
+        "Expected exactly one incompatible vo_gpu_next.c shader patch section; "
+        f"found {removed}. Refusing to alter the native patch."
+    )
+
+filtered = "".join(kept)
+if "diff --git a/video/out/vo_gpu_next.c b/video/out/vo_gpu_next.c" in filtered:
+    raise SystemExit("vo_gpu_next.c shader patch section was not fully removed")
+
+patch.write_text(filtered, encoding="utf-8")
+print("Excluded the incompatible vo_gpu_next.c shader section; retained csputils.c and video_shaders.c.")
+PY
+
 echo "Building patched FongMi mpv and Android AAR for arm64"
 (
   cd "$MPVLIB_DIR/buildscripts"
