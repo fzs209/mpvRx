@@ -126,6 +126,19 @@ jobs:
           if count != 1:
               raise SystemExit("Could not restrict the mpvlib CI recipe to arm64")
           path.write_text(source)
+
+          build_config = Path("buildscripts/include/build_config.sh")
+          config_source = build_config.read_text()
+          config_source, config_count = re.subn(
+              r"^ENABLE_X86_ARCH=true$",
+              "ENABLE_X86_ARCH=false",
+              config_source,
+              count=1,
+              flags=re.MULTILINE,
+          )
+          if config_count != 1:
+              raise SystemExit("Could not disable non-ARM64 native ABIs")
+          build_config.write_text(config_source)
           PY
           native_config="$(bash buildscripts/include/ci.sh export)"
           printf '%s\n' "$native_config" >> "$GITHUB_ENV"
