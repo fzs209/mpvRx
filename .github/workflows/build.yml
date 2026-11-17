@@ -23,42 +23,19 @@ jobs:
       fail-fast: false
       matrix:
         distribution:
-          - id: standard
-            name: Standard
-            gradle: Standard
-            dir: standard
-            abis: universal arm64-v8a armeabi-v7a x86 x86_64
-            package: apk
           - id: fongmi
-            name: FongMi
+            name: FongMi ARM64
             gradle: Fongmi
             dir: fongmi
-            abis: universal
+            abis: arm64-v8a
             package: apk
-          - id: no_vulkan
-            name: No Vulkan
-            gradle: NoVulkan
-            dir: noVulkan
-            abis: universal
-            package: apk
-          - id: playstore
-            name: Play Store
-            gradle: Playstore
-            dir: playstore
-            abis: universal
-            package: apk
-          - id: playstore_bundle
-            name: Play Store
-            gradle: Playstore
-            dir: playstore
-            abis: ''
-            package: aab
     env:
       MEASURE_API_KEY: ${{ secrets.MEASURE_API_KEY }}
       DISTRIBUTION: ${{ matrix.distribution.id }}
       GRADLE_FLAVOR: ${{ matrix.distribution.gradle }}
       APK_DIR: ${{ matrix.distribution.dir }}
       APK_ABIS: ${{ matrix.distribution.abis }}
+      TARGET_ABI: ${{ matrix.distribution.abis }}
 
     steps:
       - name: Checkout repository
@@ -96,7 +73,7 @@ jobs:
           if [[ "$DISTRIBUTION" != "playstore" ]]; then
             extra_args+=(-PexperimentalBuild=true)
           fi
-          ./gradlew "assemble${GRADLE_FLAVOR}Release" "${extra_args[@]}" --stacktrace --no-daemon --max-workers=2
+          ./gradlew "assemble${GRADLE_FLAVOR}Release" -PtargetAbi="$TARGET_ABI" "${extra_args[@]}" --stacktrace --no-daemon --max-workers=2
 
       - name: Build release bundle
         if: ${{ matrix.distribution.package == 'aab' }}
@@ -224,12 +201,14 @@ jobs:
               ;;
             fongmi)
               release_dir="app/build/outputs/apk/fongmi/release"
-              if ! compgen -G "$release_dir/app-fongmi-universal-release*.apk" >/dev/null; then
-                echo "No universal release APK found for fongmi"
+              expected_apk="$release_dir/app-fongmi-${TARGET_ABI}-release*.apk"
+              if ! compgen -G "$expected_apk" >/dev/null; then
+                echo "No FongMi APK found for $TARGET_ABI"
+                find "$release_dir" -maxdepth 1 -type f -name '*.apk' -print || true
                 exit 1
               fi
-              if find "$release_dir" -maxdepth 1 -type f -name "app-fongmi-*-release*.apk" ! -name "app-fongmi-universal-release*.apk" | grep -q .; then
-                echo "fongmi produced an unexpected ABI-specific APK"
+              if find "$release_dir" -maxdepth 1 -type f -name "app-fongmi-*-release*.apk" ! -name "app-fongmi-${TARGET_ABI}-release*.apk" | grep -q .; then
+                echo "FongMi produced an unexpected APK for another ABI"
                 find "$release_dir" -maxdepth 1 -type f -name '*.apk' -print
                 exit 1
               fi
@@ -310,12 +289,12 @@ jobs:
           retention-days: 14
           compression-level: 0
 
-      - name: Upload Fongmi universal APK
+      - name: Upload FongMi ARM64 APK
         if: ${{ matrix.distribution.id == 'fongmi' }}
         uses: actions/upload-artifact@v7
         with:
-          name: app-fongmi-release-${{ steps.metadata.outputs.short_sha }}
-          path: app/build/outputs/apk/fongmi/release/app-fongmi-universal-release*.apk
+          name: app-fongmi-arm64-v8a-release-${{ steps.metadata.outputs.short_sha }}
+          path: app/build/outputs/apk/fongmi/release/app-fongmi-arm64-v8a-release*.apk
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
@@ -353,7 +332,7 @@ jobs:
   publish-experimental:
     name: Publish experimental updates
     needs: build
-    if: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/master' }}
+    if: false # This fork build is artifact-only; do not publish upstream experimental feeds.
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
