@@ -212,27 +212,41 @@ object TreeViewScanner {
           cachedTreeViewData = stale
           cacheTimestamp = now
           cacheOptionsKey = cacheKey
-          if (refreshingKeys.add(cacheKey)) {
-            treeRefreshScope.launch {
-              try {
-                buildAndPersist(
-                  context = context,
-                  options = options,
-                  forceFileSystemCheck = false,
-                  cacheKey = cacheKey,
-                  playedMediaTitles = playedMediaTitles,
-                  showNewLabels = showNewLabels,
-                  thresholdDays = thresholdDays,
-                  newLabelOverrides = newLabelOverrides,
-                )
-              } catch (error: Exception) {
-                Log.w(TAG, "Could not refresh tree snapshot", error)
-              } finally {
-                refreshingKeys.remove(cacheKey)
-              }
-            }
-          }
+          refreshTreeInBackground(
+            context = context,
+            options = options,
+            cacheKey = cacheKey,
+            playedMediaTitles = playedMediaTitles,
+            showNewLabels = showNewLabels,
+            thresholdDays = thresholdDays,
+            newLabelOverrides = newLabelOverrides,
+          )
           return@withContext stale
+        }
+        // MediaStore has moved on since every snapshot was built, so none of them can be proven
+        // exact, and the checks above all decline. Folder view still shows its last list in that
+        // situation and rescans behind it; do the same here instead of walking the whole volume
+        // on the navigation path. The stale tree is only a stand-in while the background rebuild
+        // runs. With no snapshot at all there is nothing to show, so the build below stays
+        // synchronous for the first ever scan.
+        val staleTree =
+          cachedTreeViewData?.takeIf { cacheOptionsKey == cacheKey }
+            ?: restoreStaleTreeViewData(context, cacheKey)
+            ?: restoreStaleTreeViewData(context, baseCacheKey(options, showNewLabels, thresholdDays))
+        if (staleTree != null) {
+          cachedTreeViewData = staleTree
+          cacheTimestamp = now
+          cacheOptionsKey = cacheKey
+          refreshTreeInBackground(
+            context = context,
+            options = options,
+            cacheKey = cacheKey,
+            playedMediaTitles = playedMediaTitles,
+            showNewLabels = showNewLabels,
+            thresholdDays = thresholdDays,
+            newLabelOverrides = newLabelOverrides,
+          )
+          return@withContext staleTree
         }
       }
 
@@ -247,6 +261,50 @@ object TreeViewScanner {
         newLabelOverrides = newLabelOverrides,
       )
     }
+
+  /** Rebuilds the exact-key tree off the caller's path and swaps it into the cache when done. */
+  private fun refreshTreeInBackground(
+    context: Context,
+    options: MediaScanOptions,
+    cacheKey: String,
+    playedMediaTitles: Set<String>,
+    showNewLabels: Boolean,
+    thresholdDays: Int,
+    newLabelOverrides: Map<String, Boolean>,
+  ) {
+    if (!refreshingKeys.add(cacheKey)) return
+    treeRefreshScope.launch {
+      try {
+        buildAndPersist(
+          context = context,
+          options = options,
+          forceFileSystemCheck = false,
+          cacheKey = cacheKey,
+          playedMediaTitles = playedMediaTitles,
+          showNewLabels = showNewLabels,
+          thresholdDays = thresholdDays,
+          newLabelOverrides = newLabelOverrides,
+        )
+      } catch (error: Exception) {
+        Log.w(TAG, "Could not refresh tree snapshot", error)
+      } finally {
+        refreshingKeys.remove(cacheKey)
+      }
+    }
+  }
+
+  /**
+   * Loads a persisted tree WITHOUT the generation check in [restoreTreeViewData]. Only the
+   * stale-first branch of [getOrBuildTreeViewData] may use this, and only to put the last known
+   * tree on screen while a background rebuild runs; the result must never be treated as exact.
+   */
+  private fun restoreStaleTreeViewData(
+    context: Context,
+    cacheKey: String,
+  ): Map<String, FolderNode>? {
+    val payload = TreeViewCache.load(context, cacheKey) ?: return null
+    return decodeTreeViewData(payload)
+  }
 
   /** Builds a tree from the current library and persists it under both the exact and the base key. */
   private suspend fun buildAndPersist(
