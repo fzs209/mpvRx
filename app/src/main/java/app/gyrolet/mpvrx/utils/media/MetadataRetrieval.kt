@@ -11,6 +11,7 @@ package app.gyrolet.mpvrx.utils.media
 
 import android.content.Context
 import android.net.Uri
+import android.provider.MediaStore
 import android.util.Log
 import app.gyrolet.mpvrx.database.repository.VideoMetadataCacheRepository
 import app.gyrolet.mpvrx.domain.archive.ZipArchiveMedia
@@ -40,6 +41,9 @@ object MetadataRetrieval {
 
   /** How many content-URI probes may run at once during a folder enrichment pass. */
   private const val CONTENT_PROBE_PARALLELISM = 4
+
+  /** How many file paths to bind into one MediaStore IN query. */
+  private const val MEDIASTORE_QUERY_CHUNK = 400
 
   /**
    * Checks if video-specific metadata is needed
@@ -111,9 +115,9 @@ object MetadataRetrieval {
         return@withContext videos
       }
 
-      // Filter videos that need metadata extraction
-      // MediaStore provides width, height, duration but NOT FPS or subtitle info
-      // So we need to extract metadata if FPS or subtitle info is missing
+      // Filter videos that need metadata. Duration/resolution are filled from the
+      // database cache and MediaStore first; only fields neither source has
+      // (FPS, subtitle and codec information) still require a per-file probe.
       val videosNeedingMetadata = videos.filter { needsVideoMetadata(it, browserPreferences) }
 
       if (videosNeedingMetadata.isEmpty()) {
@@ -124,9 +128,10 @@ object MetadataRetrieval {
 
       val metadataMap =
         extractMetadataByVideoPath(
+          context = context,
           videos = videosNeedingMetadata,
           metadataCache = metadataCache,
-          includeVideoCodec = browserPreferences.showCodecSupportIndicator.get(),
+          browserPreferences = browserPreferences,
         )
 
       // Update videos with metadata
@@ -136,47 +141,72 @@ object MetadataRetrieval {
     }
 
   private suspend fun extractMetadataByVideoPath(
+    context: Context,
     videos: List<Video>,
     metadataCache: VideoMetadataCacheRepository,
-    includeVideoCodec: Boolean,
+    browserPreferences: BrowserPreferences,
   ): Map<String, MediaInfoOps.VideoMetadata> {
     val metadataByVideoPath = mutableMapOf<String, MediaInfoOps.VideoMetadata>()
+    val includeVideoCodec = browserPreferences.showCodecSupportIndicator.get()
+
+    // 1) Serve everything the database already knows with one batch query.
     val contentVideos = videos.filter { it.uri.scheme == "content" }
     if (contentVideos.isNotEmpty()) {
-      // Serve everything the database already knows with one batch query first; only
-      // videos without a usable cached entry (or still missing their codec) need a probe.
-      val cachedByPath = metadataCache.getCachedContentMetadata(contentVideos)
-      metadataByVideoPath.putAll(cachedByPath)
-      val needsExtraction =
-        contentVideos.filter { video ->
-          val cached = cachedByPath[video.path]
-          cached == null ||
-            (includeVideoCodec && !video.isAudio && video.videoCodec.isBlank() &&
-              cached.videoCodec.isBlank())
-        }
-      // Probing is the slow part of a folder scan and used to run strictly one file at a
-      // time for content URIs; run a few probes concurrently, like the local-file batch.
-      needsExtraction.chunked(CONTENT_PROBE_PARALLELISM).forEach { batch ->
-        coroutineScope {
-          batch
-            .map { video ->
-              async {
-                video.path to
-                  metadataCache.getOrExtractContentMetadata(
-                    video,
-                    includeVideoCodec && !video.isAudio && video.videoCodec.isBlank(),
-                  )
-              }
-            }
-            .awaitAll()
-            .forEach { (path, metadata) ->
-              if (metadata != null) metadataByVideoPath[path] = metadata
-            }
-        }
+      metadataByVideoPath.putAll(metadataCache.getCachedContentMetadata(contentVideos))
+    }
+
+    // 2) Fill duration/resolution/size from MediaStore with one batch query. The
+    // system media scanner has already indexed these fields, so this replaces a
+    // per-file open + parse for every video whose only missing fields are ones
+    // MediaStore carries (the common case: duration/resolution chips). MediaStore
+    // has no FPS, subtitle or codec columns, so videos needing those still fall
+    // through to probing below.
+    val mediaStoreMetadata = queryMediaStoreMetadata(context, videos)
+    if (mediaStoreMetadata.isNotEmpty()) {
+      Log.d(TAG, "MediaStore provided metadata for ${mediaStoreMetadata.size} videos")
+      videos.forEach { video ->
+        mergeMetadata(metadataByVideoPath[video.path], mediaStoreMetadata[video.path])
+          ?.let { merged -> metadataByVideoPath[video.path] = merged }
       }
     }
+
+    // 3) Probe only the videos that still miss a field an enabled chip needs.
+    val videosNeedingProbe =
+      videos.filter { video ->
+        stillNeedsProbe(video, metadataByVideoPath[video.path], browserPreferences)
+      }
+    if (videosNeedingProbe.isEmpty()) {
+      return metadataByVideoPath
+    }
+    Log.d(TAG, "Probing ${videosNeedingProbe.size} of ${videos.size} videos for remaining fields")
+
+    val contentNeedingProbe = videosNeedingProbe.filter { it.uri.scheme == "content" }
+    // Probing is the slow part of a folder scan and used to run strictly one file at a
+    // time for content URIs; run a few probes concurrently, like the local-file batch.
+    contentNeedingProbe.chunked(CONTENT_PROBE_PARALLELISM).forEach { batch ->
+      coroutineScope {
+        batch
+          .map { video ->
+            async {
+              video.path to
+                metadataCache.getOrExtractContentMetadata(
+                  video,
+                  includeVideoCodec && !video.isAudio && video.videoCodec.isBlank(),
+                )
+            }
+          }
+          .awaitAll()
+          .forEach { (path, metadata) ->
+            if (metadata != null) {
+              metadataByVideoPath[path] =
+                mergeMetadata(metadata, metadataByVideoPath[path]) ?: metadata
+            }
+          }
+      }
+    }
+
     val localFiles =
-      videos.mapNotNull { video ->
+      videosNeedingProbe.mapNotNull { video ->
         if (ZipArchiveMedia.isPlaybackUri(video.uri.toString()) ||
           video.uri.scheme == "content"
         ) return@mapNotNull null
@@ -193,10 +223,117 @@ object MetadataRetrieval {
             .mapTo(mutableSetOf()) { (_, file) -> file.absolutePath },
       )
     localFiles.forEach { (video, file) ->
-      localMetadata[file.absolutePath]?.let { metadata -> metadataByVideoPath[video.path] = metadata }
+      localMetadata[file.absolutePath]?.let { metadata ->
+        metadataByVideoPath[video.path] =
+          mergeMetadata(metadata, metadataByVideoPath[video.path]) ?: metadata
+      }
     }
 
     return metadataByVideoPath
+  }
+
+  /**
+   * Batch-reads duration/width/height/size for [videos] from MediaStore, keyed by
+   * file path. One query per chunk of paths; files the system scanner has not
+   * indexed are simply absent from the result and fall back to probing.
+   */
+  private fun queryMediaStoreMetadata(
+    context: Context,
+    videos: List<Video>,
+  ): Map<String, MediaInfoOps.VideoMetadata> {
+    val paths = videos.map { it.path }.filter { it.isNotBlank() }.distinct()
+    if (paths.isEmpty()) return emptyMap()
+    val projection =
+      arrayOf(
+        MediaStore.Video.Media.DATA,
+        MediaStore.Video.Media.DURATION,
+        MediaStore.Video.Media.WIDTH,
+        MediaStore.Video.Media.HEIGHT,
+        MediaStore.Video.Media.SIZE,
+      )
+    val result = mutableMapOf<String, MediaInfoOps.VideoMetadata>()
+    try {
+      paths.chunked(MEDIASTORE_QUERY_CHUNK).forEach { chunk ->
+        val selection =
+          "${MediaStore.Video.Media.DATA} IN (${chunk.joinToString(",") { "?" }})"
+        context.contentResolver
+          .query(
+            MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+            projection,
+            selection,
+            chunk.toTypedArray(),
+            null,
+          )
+          ?.use { cursor ->
+            val dataColumn = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.DATA)
+            val durationColumn = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.DURATION)
+            val widthColumn = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.WIDTH)
+            val heightColumn = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.HEIGHT)
+            val sizeColumn = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.SIZE)
+            while (cursor.moveToNext()) {
+              val path = cursor.getString(dataColumn) ?: continue
+              val durationMs = cursor.getLong(durationColumn)
+              val width = cursor.getInt(widthColumn)
+              val height = cursor.getInt(heightColumn)
+              if (durationMs <= 0L && width <= 0 && height <= 0) continue
+              result[path] =
+                MediaInfoOps.VideoMetadata(
+                  sizeBytes = cursor.getLong(sizeColumn),
+                  durationMs = durationMs,
+                  width = width,
+                  height = height,
+                  fps = 0f,
+                  hasEmbeddedSubtitles = false,
+                )
+            }
+          }
+      }
+    } catch (e: Exception) {
+      Log.w(TAG, "MediaStore metadata query failed", e)
+      return emptyMap()
+    }
+    return result
+  }
+
+  /** Fills the positive fields of [base] from [fill] where [base] has none. */
+  private fun mergeMetadata(
+    base: MediaInfoOps.VideoMetadata?,
+    fill: MediaInfoOps.VideoMetadata?,
+  ): MediaInfoOps.VideoMetadata? {
+    if (base == null) return fill
+    if (fill == null) return base
+    return base.copy(
+      sizeBytes = base.sizeBytes.takeIf { it > 0L } ?: fill.sizeBytes,
+      durationMs = base.durationMs.takeIf { it > 0L } ?: fill.durationMs,
+      width = base.width.takeIf { it > 0 } ?: fill.width,
+      height = base.height.takeIf { it > 0 } ?: fill.height,
+    )
+  }
+
+  /**
+   * Whether [video] still needs a per-file probe after the database cache and
+   * MediaStore fills: true only when a field an enabled chip shows is still
+   * unknown from the video itself and from [metadata].
+   */
+  private fun stillNeedsProbe(
+    video: Video,
+    metadata: MediaInfoOps.VideoMetadata?,
+    preferences: BrowserPreferences,
+  ): Boolean {
+    if (ZipArchiveMedia.isPlaybackUri(video.uri.toString())) return false
+    val duration = metadata?.durationMs?.takeIf { it > 0L } ?: video.duration
+    if (preferences.showDurationField.get() && duration <= 0L) return true
+    if (video.isAudio) return false
+    val width = metadata?.width?.takeIf { it > 0 } ?: video.width
+    val height = metadata?.height?.takeIf { it > 0 } ?: video.height
+    val fps = metadata?.fps?.takeIf { it > 0f } ?: video.fps
+    val subtitleCodec =
+      metadata?.subtitleCodec?.takeIf { it.isNotEmpty() } ?: video.subtitleCodec
+    val videoCodec = metadata?.videoCodec?.takeIf { it.isNotBlank() } ?: video.videoCodec
+    return (preferences.showResolutionChip.get() && (width == 0 || height == 0)) ||
+      (preferences.showFramerateInResolution.get() && fps == 0f) ||
+      (preferences.showSubtitleIndicator.get() && subtitleCodec.isEmpty()) ||
+      (preferences.showCodecSupportIndicator.get() && videoCodec.isBlank())
   }
 
   /**
