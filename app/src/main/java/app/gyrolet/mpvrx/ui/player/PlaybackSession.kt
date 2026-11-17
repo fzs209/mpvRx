@@ -939,6 +939,18 @@ internal fun userScriptsNeedReload(currentKey: String): Boolean {
   fun isRendererReadyFor(owner: Any): Boolean =
     nativeLock.withLock { rendererOutputReady && _state.value.surfaceAttached && attachedSurfaceOwner === owner }
 
+  /**
+   * Whether [owner] holds the attached Surface while the core is idle with nothing loaded.
+   * No video output exists in this state, so the bind-activation loop has no current-vo to
+   * observe and the renderer can only become ready after a load creates an output; a caller
+   * waiting for readiness before loading would wait forever (see MPVView.awaitSurfaceReady).
+   */
+  fun isIdleWithBoundSurface(owner: Any): Boolean =
+    nativeLock.withLock {
+      attachedSurfaceOwner === owner && _state.value.surfaceAttached && !rendererOutputReady &&
+        _state.value.phase == PlaybackPhase.IDLE && _state.value.currentItem == null
+    }
+
   fun unbindSurface(owner: Any): Boolean =
     withCore(default = false) {
       if (attachedSurfaceOwner !== owner || !_state.value.surfaceAttached) return@withCore false

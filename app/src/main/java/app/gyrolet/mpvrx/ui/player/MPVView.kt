@@ -133,8 +133,10 @@ class MPVView(
     val deadline = startedAt + SURFACE_READY_TIMEOUT_MS
     var lastReason: String? = null
     var lastReasonLogAt = 0L
+    var idleBoundSince = 0L
     while (SystemClock.elapsedRealtime() < deadline) {
       var reason: String? = null
+      var idleBound = false
       val attached =
         withContext(Dispatchers.Main.immediate) {
           when {
@@ -150,6 +152,7 @@ class MPVView(
             }
             else -> {
               reason = surfaceWaitReason()
+              idleBound = PlaybackSession.isIdleWithBoundSurface(this@MPVView)
               null
             }
           }
@@ -164,9 +167,26 @@ class MPVView(
         }
         return attached
       }
+      // Idle fast-path: with the Surface bound but the core idle and nothing loaded, no
+      // video output exists for the activation loop to observe, so readiness can only
+      // follow a load. Once that state has held for the grace period, stop waiting and
+      // let the caller take its deferred-selection load (which creates the output).
+      val now = SystemClock.elapsedRealtime()
+      if (idleBound) {
+        if (idleBoundSince == 0L) idleBoundSince = now
+        if (now - idleBoundSince >= SURFACE_IDLE_FAST_PATH_MS) {
+          Log.d(
+            TAG,
+            "SurfaceDiag: surface bound but core idle without a video output for " +
+              "${now - idleBoundSince} ms; proceeding with deferred video selection",
+          )
+          return false
+        }
+      } else {
+        idleBoundSince = 0L
+      }
       // SurfaceDiag: name the blocking precondition, at most once per second per reason,
       // so a reproduction log shows which stage of the handoff stalled.
-      val now = SystemClock.elapsedRealtime()
       if (reason != null && (reason != lastReason || now - lastReasonLogAt >= 1_000L)) {
         Log.d(TAG, "SurfaceDiag: waiting for surface (${now - startedAt} ms): $reason")
         lastReason = reason
@@ -731,6 +751,11 @@ class MPVView(
     const val OSD_REFERENCE_HEIGHT = 720.0
     const val SURFACE_RETRY_MS = 250L
     const val SURFACE_READY_TIMEOUT_MS = 5_000L
+    // Grace for the idle fast-path in awaitSurfaceReady: a still-living previous video
+    // output activates within ~10 ms of the bind, so 200 ms of continuous futility only
+    // fires once it is gone. Polls are SURFACE_RETRY_MS apart, so the bail lands ~250 ms
+    // after the futile state is first observed.
+    const val SURFACE_IDLE_FAST_PATH_MS = 200L
   }
 
   @Suppress("ReturnCount", "DEPRECATION")
