@@ -211,6 +211,9 @@ class MPVView(
   internal fun attachSessionSurface() {
     renderCallbacksEnabled = true
     ensureSurfaceAttached()
+    // This runs after libmpv initialization and after the player view is attached to its actual
+    // window, so both the native P8.1 option probe and the active-display query are meaningful.
+    refreshDolbyVisionDirectOutput()
   }
 
   /**
