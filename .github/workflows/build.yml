@@ -18,7 +18,7 @@ jobs:
   build:
     name: Build ${{ matrix.distribution.name }} ${{ matrix.distribution.package == 'aab' && 'bundle' || 'APKs' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
@@ -36,6 +36,14 @@ jobs:
       APK_DIR: ${{ matrix.distribution.dir }}
       APK_ABIS: ${{ matrix.distribution.abis }}
       TARGET_ABI: ${{ matrix.distribution.abis }}
+      MPVLIB_DIR: ${{ github.workspace }}/native/mpvlibAndroid
+      MPV_GIT_URL: https://github.com/FongMi/mpv.git
+      MPV_GIT_REF: fongmi
+      FFMPEG_GIT_URL: https://github.com/FongMi/FFmpeg.git
+      LIBPLACEBO_GIT_URL: https://github.com/FongMi/libplacebo.git
+      CACHE_MODE: folder
+      CACHE_FOLDER: ${{ github.workspace }}/.mpvlib-native-prefix-cache
+      LIBPLACEBO_CACHE_FOLDER: ${{ github.workspace }}/.mpvlib-libplacebo-cache
 
     steps:
       - name: Checkout repository
@@ -63,6 +71,130 @@ jobs:
 
       - name: Make Gradle wrapper executable
         run: chmod +x ./gradlew
+
+      # The published FongMi AAR marks mediacodec_embed as a native Dolby Vision
+      # sink unconditionally. Rebuild it from the pinned FongMi mpv source with
+      # the per-session sink-capability patch before compiling the app.
+      - name: Checkout FongMi native library build recipes
+        if: ${{ matrix.distribution.id == 'fongmi' }}
+        uses: actions/checkout@v7
+        with:
+          repository: Riteshp2001/mpvlibAndroid
+          ref: mpv-fongmi
+          path: native/mpvlibAndroid
+          fetch-depth: 1
+
+      - name: Set up Python for native dependencies
+        if: ${{ matrix.distribution.id == 'fongmi' }}
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install FongMi native build dependencies
+        if: ${{ matrix.distribution.id == 'fongmi' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            autoconf ant automake build-essential ccache gcc g++ \
+            gcc-multilib libc6-dev-i386 cmake gettext gperf libtool \
+            nasm ninja-build pkg-config patch python3 python3-pip unzip wget
+          python3 -m pip install --upgrade pip
+          python3 -m pip install --upgrade meson jinja2 jsonschema
+
+      - name: Prepare reproducible ARM64 native build
+        id: native-config
+        if: ${{ matrix.distribution.id == 'fongmi' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$MPVLIB_DIR"
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path("buildscripts/include/ci.sh")
+          source = path.read_text()
+          pattern = r"ci_build_arches=\\(\\n[ \\t]*armv7l\\n[ \\t]*arm64\\n\\)"
+          source, count = re.subn(
+              pattern,
+              "ci_build_arches=(\\n\\tarm64\\n)",
+              source,
+              count=1,
+          )
+          if count != 1:
+              raise SystemExit("Could not restrict the mpvlib CI recipe to arm64")
+          path.write_text(source)
+          PY
+          native_config="$(bash buildscripts/include/ci.sh export)"
+          printf '%s\\n' "$native_config" >> "$GITHUB_ENV"
+          printf '%s\\n' "$native_config" >> "$GITHUB_OUTPUT"
+
+      - name: Restore FongMi Android SDK cache
+        if: ${{ matrix.distribution.id == 'fongmi' }}
+        uses: actions/cache/restore@v6
+        with:
+          path: native/mpvlibAndroid/buildscripts/sdk/
+          key: mpvlib-android-sdk-${{ runner.os }}-${{ hashFiles('native/mpvlibAndroid/buildscripts/include/depinfo.sh', 'native/mpvlibAndroid/buildscripts/include/download-sdk.sh') }}
+          restore-keys: |
+            mpvlib-android-sdk-${{ runner.os }}-
+
+      - name: Restore FongMi native prefix cache
+        id: native-prefix-cache
+        if: ${{ matrix.distribution.id == 'fongmi' }}
+        uses: actions/cache/restore@v6
+        with:
+          path: .mpvlib-native-prefix-cache/
+          key: mpvlib-native-prefix-${{ runner.os }}-${{ steps.native-config.outputs.CACHE_IDENTIFIER }}
+          restore-keys: |
+            mpvlib-native-prefix-${{ runner.os }}-
+
+      - name: Restore FongMi libplacebo cache
+        id: native-libplacebo-cache
+        if: ${{ matrix.distribution.id == 'fongmi' }}
+        uses: actions/cache/restore@v6
+        with:
+          path: .mpvlib-libplacebo-cache/
+          key: mpvlib-libplacebo-${{ runner.os }}-${{ steps.native-config.outputs.LIBPLACEBO_CACHE_IDENTIFIER }}
+          restore-keys: |
+            mpvlib-libplacebo-${{ runner.os }}-
+
+      - name: Download FongMi native SDK and dependencies
+        if: ${{ matrix.distribution.id == 'fongmi' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$MPVLIB_DIR"
+          bash buildscripts/include/ci.sh install
+
+      - name: Build patched FongMi ARM64 AAR
+        if: ${{ matrix.distribution.id == 'fongmi' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/build-fongmi-native.sh
+
+      - name: Save FongMi Android SDK cache
+        if: ${{ matrix.distribution.id == 'fongmi' && steps.android-sdk-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v6
+        with:
+          path: native/mpvlibAndroid/buildscripts/sdk/
+          key: mpvlib-android-sdk-${{ runner.os }}-${{ hashFiles('native/mpvlibAndroid/buildscripts/include/depinfo.sh', 'native/mpvlibAndroid/buildscripts/include/download-sdk.sh') }}
+
+      - name: Save FongMi native prefix cache
+        if: ${{ matrix.distribution.id == 'fongmi' && steps.native-prefix-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v6
+        with:
+          path: .mpvlib-native-prefix-cache/
+          key: mpvlib-native-prefix-${{ runner.os }}-${{ steps.native-config.outputs.CACHE_IDENTIFIER }}
+
+      - name: Save FongMi libplacebo cache
+        if: ${{ matrix.distribution.id == 'fongmi' && steps.native-libplacebo-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v6
+        with:
+          path: .mpvlib-libplacebo-cache/
+          key: mpvlib-libplacebo-${{ runner.os }}-${{ steps.native-config.outputs.LIBPLACEBO_CACHE_IDENTIFIER }}
 
       - name: Validate release signing secrets
         shell: bash
