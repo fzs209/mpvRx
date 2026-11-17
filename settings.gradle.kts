@@ -25,7 +25,14 @@ dependencyResolutionManagement {
       forRepository {
         ivy {
           name = "mpvlibGitHubReleases"
-          url = uri("https://github.com/Riteshp2001/mpvlibAndroid/releases/download")
+          // The patched-FongMi workflow (.github/workflows/build-fongmi-patched.yml)
+          // builds mpvlib from source and passes -PmpvlibReleasesUrl=<local dir>
+          // with this same layout; the property is unset everywhere else, so
+          // normal builds keep resolving the upstream release.
+          url = uri(
+            gradle.startParameter.projectProperties["mpvlibReleasesUrl"]
+              ?: "https://github.com/Riteshp2001/mpvlibAndroid/releases/download"
+          )
           patternLayout {
             artifact("v[revision]/[artifact]-[revision].[ext]")
           }

@@ -1,0 +1,53 @@
+FongMi/FFmpeg (branch release-9.1-fongmi): fall back to the Dolby Vision
+base layer when the sink demands native DV but the device has no DV decoder.
+
+Problem: with vo=mediacodec_embed, mpv sets the decoder AVOption
+dovi_sink_support=1 from the VO's VO_CAP_NATIVE_DOVI capability, so
+mediacodec_decode_init() unconditionally requests a native Dolby Vision
+MediaCodec decoder for DV streams. On devices without one (e.g. a
+HDR10/HLG-only phone), ff_mediacodec_dec_init() fails in
+getCodecNameByType(video/dolby-vision, ...) and playback ends with
+audio only ("Video: no video"), even for Profile 8.1 streams whose
+HDR10 base layer the device decodes fine - the same streams play
+correctly through a non-embed output, where dovi_sink_support=0 takes
+the existing base-layer fallback.
+
+Fix: when a native DV decoder was requested and the stream has a
+compatible base layer, probe MediaCodecList once for a DV decoder of
+the stream's profile; if none exists, clear decoder_dovi so the
+existing base-layer path runs. Devices with a DV decoder are
+unaffected, and profiles without a compatible base layer (e.g. 5)
+still fail as before.
+
+Apply in the FFmpeg tree:  git apply ffmpeg-dovi-base-layer-fallback.patch
+(or: patch -p1 < ffmpeg-dovi-base-layer-fallback.patch)
+
+--- a/libavcodec/mediacodecdec.c
++++ b/libavcodec/mediacodecdec.c
+@@ -777,6 +777,26 @@
+         decoder_dovi = NULL;
+     }
+ 
++    /* A sink can declare native Dolby Vision support (the embedded
++     * MediaCodec output does) on a device that has no Dolby Vision
++     * decoder at all. Demanding one then fails outright even when the
++     * stream's base layer is fully compatible, so probe for the decoder
++     * first and fall back to the base layer when it is missing. */
++    if (decoder_dovi &&
++        mediacodec_dovi_has_compatible_base_layer(avctx, decoder_dovi)) {
++        char *dv_codec_name = ff_AMediaCodecList_getCodecNameByType(
++            FF_MEDIACODEC_MIME_DOLBY_VISION, 1 << decoder_dovi->dv_profile,
++            0, NULL, avctx);
++        if (!dv_codec_name) {
++            av_log(avctx, AV_LOG_WARNING,
++                   "No Dolby Vision MediaCodec decoder for profile %u, "
++                   "using the base-layer decoder\n",
++                   decoder_dovi->dv_profile);
++            decoder_dovi = NULL;
++        }
++        av_freep(&dv_codec_name);
++    }
++
+     ret = mediacodec_init_decoder(avctx, s, decoder_dovi);
+     if (ret < 0)
+         goto fail;
