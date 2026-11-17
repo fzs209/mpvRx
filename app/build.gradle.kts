@@ -96,7 +96,7 @@ android {
   defaultConfig {
     manifestPlaceholders["measureApiKey"] = measureApiKey
     buildConfigField("boolean", "MEASURE_CONFIGURED", measureApiKey.isNotBlank().toString())
-    applicationId = "app.gyrolet.mpvrx"
+    applicationId = "com.fzs209.mpvrx"
     minSdk = 26
     targetSdk = 36
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
