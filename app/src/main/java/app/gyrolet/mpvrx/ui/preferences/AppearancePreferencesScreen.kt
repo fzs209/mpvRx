@@ -498,7 +498,7 @@ object AppearancePreferencesScreen : Screen {
 
           item {
             ExpressivePreferenceGroup {
-              val itemCount = 8
+              val itemCount = 7
               val unlimitedNameLines by preferences.unlimitedNameLines.collectAsState()
               SwitchPreference(
                 modifier = Modifier.settingsSearchTarget(R.string.pref_appearance_unlimited_name_lines_title),
@@ -644,22 +644,6 @@ object AppearancePreferencesScreen : Screen {
                 groupSize = itemCount,
               )
 
-              val showContinueWatching by browserPreferences.showContinueWatching.collectAsState()
-              SwitchPreference(
-                modifier = Modifier.settingsSearchTarget(R.string.pref_continue_watching_title),
-                value = showContinueWatching,
-                onValueChange = { browserPreferences.showContinueWatching.set(it) },
-                title = { Text(stringResource(R.string.pref_continue_watching_title)) },
-                summary = {
-                  Text(
-                    text = stringResource(R.string.pref_continue_watching_summary),
-                    color = MaterialTheme.colorScheme.outline,
-                  )
-                },
-                groupIndex = 6,
-                groupSize = itemCount,
-              )
-
               val deleteFolderAllContents by browserPreferences.deleteFolderAllContents.collectAsState()
               SwitchPreference(
                 modifier = Modifier.settingsSearchTarget(R.string.ui_delete_folder_all_contents),
@@ -683,7 +667,7 @@ object AppearancePreferencesScreen : Screen {
                     color = MaterialTheme.colorScheme.outline,
                   )
                 },
-                groupIndex = 7,
+                groupIndex = 6,
                 groupSize = itemCount,
               )
             }
@@ -975,26 +959,29 @@ object AppearancePreferencesScreen : Screen {
                 else -> ReorderableTabItem(id, stringResource(R.string.pref_nav_profile_title), stringResource(R.string.pref_nav_profile_summary), showProfileTab, titleRes = R.string.pref_nav_profile_title)
               }
             }
-            ExpressivePreferenceGroup {
-              ReorderableTabPreferences(
-                tabs = tabItems,
-                onEnabledChange = { id, enabled ->
-                  when (id) {
-                    "MUSIC" -> preferences.showMusicTab.set(enabled)
-                    "NETWORK" -> preferences.showNetworkTab.set(enabled)
-                    "JELLYFIN" -> preferences.showJellyfinTab.set(enabled)
-                    "PROFILE" -> preferences.showProfileTab.set(enabled)
-                  }
-                },
-                onMove = { id, destination ->
-                  if (id != "HOME") {
-                    val current = ordered.toMutableList()
-                    current.remove(id)
-                    current.add(destination.coerceIn(1, current.size), id)
-                    preferences.bottomNavigationOrder.set(current)
-                  }
-                },
-              )
+            Column(modifier = Modifier.fillMaxWidth()) {
+              ExpressivePreferenceGroup {
+                ReorderableTabPreferences(
+                  tabs = tabItems,
+                  onEnabledChange = { id, enabled ->
+                    when (id) {
+                      "MUSIC" -> preferences.showMusicTab.set(enabled)
+                      "NETWORK" -> preferences.showNetworkTab.set(enabled)
+                      "JELLYFIN" -> preferences.showJellyfinTab.set(enabled)
+                      "PROFILE" -> preferences.showProfileTab.set(enabled)
+                    }
+                  },
+                  onMove = { id, destination ->
+                    if (id != "HOME") {
+                      val current = ordered.toMutableList()
+                      current.remove(id)
+                      current.add(destination.coerceIn(1, current.size), id)
+                      preferences.bottomNavigationOrder.set(current)
+                    }
+                  },
+                )
+              }
+              ProfileLayoutPreferences(preferences)
             }
           }
 

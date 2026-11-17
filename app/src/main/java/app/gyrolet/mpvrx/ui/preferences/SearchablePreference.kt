@@ -1637,7 +1637,6 @@ object SearchablePreferences {
         anchorItemIndex = 3,
         SearchEntrySpec(R.string.pref_tree_flatten_depth_title, listOf("tree", "folder", "path", "flatten", "compression")),
         SearchEntrySpec(R.string.ui_dual_pane_view, listOf("tablet", "two pane", "split", "folder")),
-        SearchEntrySpec(R.string.pref_continue_watching_title, listOf("recent", "recently played", "resume", "home", "carousel")),
         SearchEntrySpec(R.string.ui_delete_folder_all_contents, listOf("delete", "folder", "all files", "media only")),
       )
       addSearchEntries(
@@ -1660,6 +1659,10 @@ object SearchablePreferences {
         anchorItemIndex = 7,
         SearchEntrySpec(R.string.pref_nav_music_title, listOf("music", "audio", "tab", "navigation")),
         SearchEntrySpec(R.string.pref_nav_profile_title, listOf("profile", "you", "library", "tab", "navigation")),
+        SearchEntrySpec(R.string.profile_layout_title, listOf("profile", "customize", "layout", "reorder", "hide", "cards")),
+        SearchEntrySpec(R.string.profile_layout_hubs, listOf("profile", "hub", "recents", "playlists", "snapshots", "network")),
+        SearchEntrySpec(R.string.profile_layout_sections, listOf("profile", "sections", "order", "visibility")),
+        SearchEntrySpec(R.string.profile_layout_statistics, listOf("profile", "statistics", "watch time", "most played", "weekly", "cards")),
         SearchEntrySpec(R.string.navbar_glow_title, listOf("glass", "glow", "navbar", "rim", "highlight", "liquid glass")),
         SearchEntrySpec(
           R.string.legacy_navigation_bar_title,
@@ -1959,6 +1962,7 @@ object SearchablePreferences {
           SearchEntrySpec(R.string.ui_download_media_subtitles, listOf("yt-dlp", "subtitle", "download", "manual")),
           SearchEntrySpec(R.string.ui_include_auto_generated_subtitles, listOf("yt-dlp", "subtitle", "automatic", "captions", "youtube")),
           SearchEntrySpec(R.string.ytdlp_playlist_behavior, listOf("yt-dlp", "playlist", "video", "all entries")),
+          SearchEntrySpec(R.string.ytdlp_cookies_title, listOf("youtube", "yt-dlp", "cookies", "sign in", "authentication", "bot", "import")),
         )
       }
 
