@@ -15,6 +15,7 @@ import android.view.View
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -36,15 +37,36 @@ fun CastPlayerButton(
   borderless: Boolean,
   buttonSize: Dp,
   onInvoked: () -> Unit = {},
+  onActivate: () -> Unit = {},
   contentColor: ComposeColor? = null,
 ) {
   val castContentDescription =
     androidx.compose.ui.res
       .stringResource(app.gyrolet.mpvrx.R.string.ui_cast)
   var routeButton by remember { mutableStateOf<MediaRouteButton?>(null) }
+  var activationRequested by remember { mutableStateOf(false) }
+  // Setting up the SDK route button initialises the Cast framework, which stalls the main
+  // thread for seconds on devices without Google Play services. The route button is therefore
+  // only created after the first tap; until then the shared controls button alone is drawn,
+  // so opening the player never touches Cast.
+  LaunchedEffect(routeButton, activationRequested) {
+    val button = routeButton
+    if (activationRequested && button != null) {
+      activationRequested = false
+      button.performClick()
+    }
+  }
   Box(modifier = Modifier.size(buttonSize), contentAlignment = Alignment.Center) {
     AdaptiveControlsButton(
-      onClick = { routeButton?.performClick() },
+      onClick = {
+        onActivate()
+        val button = routeButton
+        if (button != null) {
+          button.performClick()
+        } else {
+          activationRequested = true
+        }
+      },
       modifier = Modifier.size(buttonSize),
       icon = PlayerButton.CAST.icon,
       title = castContentDescription,
@@ -52,22 +74,24 @@ fun CastPlayerButton(
       buttonSize = buttonSize,
       borderless = borderless,
     )
-    AndroidView(
-      factory = { context ->
-        MediaRouteButton(context).apply {
-          setBackgroundColor(Color.TRANSPARENT)
-          CastButtonFactory.setUpMediaRouteButton(context.applicationContext, this)
-          setRemoteIndicatorDrawable(ColorDrawable(Color.TRANSPARENT))
-          routeButton = this
-        }
-      },
-      update = { button ->
-        button.contentDescription = castContentDescription
-        button.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
-        button.isFocusable = false
-        button.setOnClickListener { onInvoked() }
-      },
-      modifier = Modifier.size(0.dp),
-    )
+    if (activationRequested || routeButton != null) {
+      AndroidView(
+        factory = { context ->
+          MediaRouteButton(context).apply {
+            setBackgroundColor(Color.TRANSPARENT)
+            CastButtonFactory.setUpMediaRouteButton(context.applicationContext, this)
+            setRemoteIndicatorDrawable(ColorDrawable(Color.TRANSPARENT))
+            routeButton = this
+          }
+        },
+        update = { button ->
+          button.contentDescription = castContentDescription
+          button.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+          button.isFocusable = false
+          button.setOnClickListener { onInvoked() }
+        },
+        modifier = Modifier.size(0.dp),
+      )
+    }
   }
 }

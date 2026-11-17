@@ -930,7 +930,6 @@ class PlayerActivity :
     }
     observePlaybackSessionQueue()
     observeTorrentStreamingState()
-    setupCastPlayback()
 
     // Video mode waits for mpv geometry; every other preference is decidable now. Audio launches
     // always decide now. In the waiting case applyInitialVideoOrientation already ran before
@@ -1688,6 +1687,20 @@ class PlayerActivity :
       isAudioPlayer = { (viewModelHostAttached && viewModel.isAudioOnly.value) || isCurrentMediaKnownAudio() },
       isVideoLoaded = { isReady },
     )
+  }
+
+  private var castPlaybackStarted = false
+
+  /**
+   * Starts Cast on first use only. Initialising the Cast framework can stall the main thread
+   * for seconds on devices without Google Play services, where its Dynamite module is absent
+   * and the lookup fails slowly; merely opening a video must not pay for a feature the user
+   * may never invoke. Called by the Cast button in the player controls; later calls are no-ops.
+   */
+  fun startCastPlaybackIfNeeded() {
+    if (castPlaybackStarted) return
+    castPlaybackStarted = true
+    setupCastPlayback()
   }
 
   private fun setupCastPlayback() {

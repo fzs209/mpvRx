@@ -911,6 +911,7 @@ fun RenderPlayerButton(
         borderless = borderless,
         buttonSize = buttonSize,
         onInvoked = clickEvent,
+        onActivate = { activity.startCastPlaybackIfNeeded() },
         contentColor = if (borderless) controlColor else null,
       )
     }
