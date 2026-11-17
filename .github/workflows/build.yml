@@ -116,10 +116,10 @@ jobs:
 
           path = Path("buildscripts/include/ci.sh")
           source = path.read_text()
-          pattern = r"ci_build_arches=\\(\\n[ \\t]*armv7l\\n[ \\t]*arm64\\n\\)"
+          pattern = r"ci_build_arches=\(\n[ \t]*armv7l\n[ \t]*arm64\n\)"
           source, count = re.subn(
               pattern,
-              "ci_build_arches=(\\n\\tarm64\\n)",
+              "ci_build_arches=(\n\tarm64\n)",
               source,
               count=1,
           )
@@ -128,10 +128,11 @@ jobs:
           path.write_text(source)
           PY
           native_config="$(bash buildscripts/include/ci.sh export)"
-          printf '%s\\n' "$native_config" >> "$GITHUB_ENV"
-          printf '%s\\n' "$native_config" >> "$GITHUB_OUTPUT"
+          printf '%s\n' "$native_config" >> "$GITHUB_ENV"
+          printf '%s\n' "$native_config" >> "$GITHUB_OUTPUT"
 
       - name: Restore FongMi Android SDK cache
+        id: android-sdk-cache
         if: ${{ matrix.distribution.id == 'fongmi' }}
         uses: actions/cache/restore@v6
         with:
