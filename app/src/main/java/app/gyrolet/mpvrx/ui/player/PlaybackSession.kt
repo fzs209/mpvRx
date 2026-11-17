@@ -34,10 +34,13 @@ import app.gyrolet.mpvrx.utils.media.HttpUtils
 import `is`.xyz.mpv.MPVLib
 import `is`.xyz.mpv.MPVNode
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -157,14 +160,14 @@ object PlaybackSession : MPVLib.EventObserver {
   private class NativeEventObserver : MPVLib.EventObserver {
     @Volatile private var fileGeneration: Long? = null
 
-    private fun enqueue(eventId: Int? = null, action: () -> Unit) {
+    private fun enqueue(eventId: Int? = null, coreEvent: Boolean = false, action: () -> Unit) {
       val expectedGeneration = fileGeneration
       nativeEvents.launch {
         nativeLock.withLock {
           val completingStop = eventId == MPVLib.MpvEvent.MPV_EVENT_END_FILE &&
             (_state.value.phase == PlaybackPhase.STOPPING || supersededStopGeneration != 0L)
           if (nativeObserver === this@NativeEventObserver &&
-            (expectedGeneration == null || expectedGeneration == _state.value.generation || completingStop ||
+            (coreEvent || expectedGeneration == null || expectedGeneration == _state.value.generation || completingStop ||
               eventId == MPVLib.MpvEvent.MPV_EVENT_SHUTDOWN)
           ) action()
         }
@@ -181,7 +184,8 @@ object PlaybackSession : MPVLib.EventObserver {
 
     override fun eventProperty(property: String, value: Double) = enqueue { PlaybackSession.eventProperty(property, value) }
 
-    override fun eventProperty(property: String, value: MPVNode) = enqueue { PlaybackSession.eventProperty(property, value) }
+    override fun eventProperty(property: String, value: MPVNode) =
+      enqueue(coreEvent = property == STATISTICS_STATE_PROPERTY) { PlaybackSession.eventProperty(property, value) }
 
     override fun event(eventId: Int, data: MPVNode) {
       if (eventId == MPVLib.MpvEvent.MPV_EVENT_START_FILE) fileGeneration = _state.value.generation
@@ -200,8 +204,25 @@ object PlaybackSession : MPVLib.EventObserver {
   private const val PLAYBACK_TRANSITION_AUDIO_RESTORE_DELAY_MS = 180L
   private const val AMBIENT_SHADER_PREFIX = "ambient_"
   private const val AMBIENT_SHADER_SUFFIX = ".glsl"
-  /** Mirror of the last applied statistics page; absent means a fresh core with the overlay down. */
-  private const val STATISTICS_PAGE_PROPERTY = "user-data/mpvrx/statistics-page"
+  private const val STATISTICS_REQUEST_PROPERTY = "user-data/mpvrx/statistics-request"
+  private const val STATISTICS_STATE_PROPERTY = "user-data/mpvrx/statistics-state"
+  private const val STATISTICS_ANDROID_PROPERTY = "user-data/mpvrx/statistics-android"
+  private val statisticsErrorHandler = CoroutineExceptionHandler { _, error ->
+    Log.e(TAG, "Statistics update failed", error)
+  }
+  private val statisticsCommands =
+    CoroutineScope(SupervisorJob() + Dispatchers.IO.limitedParallelism(1) + statisticsErrorHandler)
+  private val statisticsDiagnostics = CoroutineScope(SupervisorJob() + Dispatchers.IO + statisticsErrorHandler)
+  private var statisticsDiagnosticsJob: Job? = null
+  private var sessionBatteryGeneration = 0L
+  private var sessionBatteryBaseline: SessionBatteryReading? = null
+  private var sessionBatteryBaselineJob: Job? = null
+  internal val scrollableStatisticsPages = setOf(2, 4, 5, 6, 7, 8)
+  private val statisticsStateLock = Any()
+  private var statisticsRevision = 0L
+  private var statisticsSelectionRequested = false
+  private val _visibleStatisticsPage = MutableStateFlow(0)
+  internal val visibleStatisticsPage: StateFlow<Int> = _visibleStatisticsPage.asStateFlow()
   private val TIMELINE_PROPERTIES =
     setOf(
       "time-pos",
@@ -560,6 +581,7 @@ internal fun userScriptsNeedReload(currentKey: String): Boolean {
         failedAutoEqGeneration = null
         _autoEqUnavailable.value = false
         nativeCoreReady = false
+        resetStatisticsState()
         observedProperties.clear()
         suspendedVideoTrack = null
         rendererOutputReady = false
@@ -611,6 +633,7 @@ internal fun userScriptsNeedReload(currentKey: String): Boolean {
           reobserveTrackedProperties()
           observeProperties()
           initialized = true
+          observeProperty(STATISTICS_STATE_PROPERTY, MPVLib.MpvFormat.MPV_FORMAT_NODE)
           observeProperty("audio-params", MPVLib.MpvFormat.MPV_FORMAT_NODE)
           observeProperty("audio-out-params", MPVLib.MpvFormat.MPV_FORMAT_NODE)
           startSpatialAudioObserverLocked()
@@ -623,6 +646,7 @@ internal fun userScriptsNeedReload(currentKey: String): Boolean {
           if (coreCreated) runCatching { MPVLib.destroy() }
           initialized = false
           nativeCoreReady = false
+          resetStatisticsState()
           activeCoreConfigurationKey = null
           activeUserScriptsKey = null
           suspendedVideoTrack = null
@@ -1026,6 +1050,7 @@ internal fun userScriptsNeedReload(currentKey: String): Boolean {
 
   fun stop(clearQueue: Boolean = true) {
     withCore(Unit) {
+      clearSessionBatteryMeasurementLocked()
       AudiobookPlayback.capture()
       loadedPlaybackItem = null
       AudiobookPlayback.clearTimer()
@@ -1188,6 +1213,8 @@ internal fun userScriptsNeedReload(currentKey: String): Boolean {
   }
 
   private fun destroyLocked(nativeShutdown: Boolean = false) {
+    clearSessionBatteryMeasurementLocked()
+    resetStatisticsState()
     val nextGeneration = _state.value.generation + 1L
     if (!nativeShutdown) AudiobookPlayback.capture()
     loadedPlaybackItem = null
@@ -1714,62 +1741,134 @@ internal fun userScriptsNeedReload(currentKey: String): Boolean {
 
   fun commandNode(vararg command: String): MPVNode? = withCore(null) { MPVLib.commandNode(*command) }
 
-  /**
-   * Applies the statistics page selection (0 = off, 1..5 = mpv stats pages, 6 = the app's own
-   * time/network overlay, 7 = console) as one atomic transition and stores it as the visible
-   * selection.
-   *
-   * mpv's stats.lua keeps its visibility and page in script-local state with no property to read,
-   * so the last applied selection is mirrored in [STATISTICS_PAGE_PROPERTY]. Absent means a fresh
-   * core, which always starts with the overlay hidden. Every transition reads that mirror under
-   * the session lock, so the chips stay idempotent: a page is only ever shown (never blind-
-   * toggled, which is what turned "off" back into page 1) and hiding is skipped when the overlay
-   * is already down. Showing always toggles first when the mirror says the overlay is down,
-   * because `display-page-N` on a hidden overlay starts stats.lua's self-clearing oneshot mode,
-   * which vanished after four seconds and left the mirror and the screen disagreeing.
-   */
+  /** 0 = Off, 1..6 = stats.lua pages, 7 = Console, 8 = mpv's keyboard-only page 0. */
   fun setStatisticsPage(page: Int) {
-    if (page !in 0..7) return
-    // The preference is the chip highlight; write it even when the core is not ready so the
-    // selection never lags behind the tap, then reconcile the core when it is.
-    advancedPreferences.enabledStatisticsPage.set(page)
-    withCore(Unit) {
-      val applied = getPropertyString(STATISTICS_PAGE_PROPERTY)
-      val previous = applied?.toIntOrNull() ?: 0
-      val consoleOpen = getPropertyBoolean("user-data/mpv/console/open") == true
-      if (page != 7 && consoleOpen) command("script-message-to", "console", "disable")
-      // Already in the requested state: nothing to send, so a repeated tap cannot flip it.
-      if (previous == page && (page != 7 || consoleOpen)) return@withCore
-      val statsVisible = previous in 1..5
-      if (page in 1..5) {
-        // Unhide first: display-page-N on a hidden overlay starts stats.lua's self-clearing
-        // oneshot mode, which disappears after four seconds.
-        if (!statsVisible) command("script-binding", "stats/display-stats-toggle")
-        command("script-binding", "stats/display-page-$page")
-      } else if (statsVisible) {
-        command("script-binding", "stats/display-stats-toggle")
+    require(page in 0..8) { "Invalid statistics page: $page" }
+    val revision =
+      synchronized(statisticsStateLock) {
+        statisticsSelectionRequested = true
+        statisticsRevision += 1
+        advancedPreferences.enabledStatisticsPage.set(page)
+        statisticsRevision
       }
-      if (page == 7 && !consoleOpen) command("script-binding", "console/enable")
-      setPropertyString(STATISTICS_PAGE_PROPERTY, page.toString())
+    // Native property writes can wait for mpv, but the tap and Off feedback must not.
+    statisticsCommands.launch {
+      withReadyCore(Unit) {
+        val current = synchronized(statisticsStateLock) { revision == statisticsRevision }
+        if (current) MPVLib.setPropertyString(STATISTICS_REQUEST_PROPERTY, "$revision:$page")
+      }
     }
   }
 
-  /**
-   * Restores the selected statistics page on load. Safe to call on every load: the mirror makes
-   * the transition idempotent, so an overlay that is already up stays up instead of being
-   * toggled off by a second restore. The console is only restored while it is actually open;
-   * the app's own overlay (6) needs no mpv state and is drawn from the preference.
-   */
-  fun restoreStatisticsPage() {
-    val page = advancedPreferences.enabledStatisticsPage.get()
-    val consoleOpen = getPropertyBoolean("user-data/mpv/console/open") == true
-    setStatisticsPage(
-      when {
-        page in 1..5 || page == 6 -> page
-        page == 7 && consoleOpen -> 7
-        else -> 0
-      },
-    )
+  /** Restore once per core; media changes and Activity re-entry must not reopen an overlay. */
+  fun restoreStatisticsPage() = synchronized(statisticsStateLock) {
+    if (!statisticsSelectionRequested) {
+      val saved = advancedPreferences.enabledStatisticsPage.get()
+      if (saved !in 0..8) Log.w(TAG, "Discarding invalid saved statistics page: $saved")
+      setStatisticsPage(if (saved in 1..6 || saved == 8) saved else 0)
+    }
+  }
+
+  private fun resetStatisticsState() = synchronized(statisticsStateLock) {
+    statisticsDiagnosticsJob?.cancel()
+    statisticsDiagnosticsJob = null
+    statisticsRevision += 1
+    statisticsSelectionRequested = false
+    _visibleStatisticsPage.value = 0
+  }
+
+  private fun beginSessionBatteryMeasurementLocked(generation: Long) {
+    if (sessionBatteryGeneration == generation) return
+    clearSessionBatteryMeasurementLocked()
+    sessionBatteryGeneration = generation
+    val context = checkNotNull(applicationContext) { "Battery measurement requires an initialized application context" }
+    val core = nativeObserver
+    sessionBatteryBaselineJob = statisticsDiagnostics.launch {
+      val reading =
+        try {
+          readSessionBatteryReading(context)
+        } catch (error: SecurityException) {
+          Log.w(TAG, "Battery measurement access was denied", error)
+          SessionBatteryReading(null, null, null)
+        }
+      nativeLock.withLock {
+        if (isActive && nativeObserver === core && _state.value.generation == generation &&
+          _state.value.phase != PlaybackPhase.STOPPING
+        ) {
+          sessionBatteryBaseline = reading
+        }
+      }
+    }
+  }
+
+  private fun clearSessionBatteryMeasurementLocked() {
+    sessionBatteryBaselineJob?.cancel()
+    sessionBatteryBaselineJob = null
+    sessionBatteryBaseline = null
+    sessionBatteryGeneration = 0L
+  }
+
+  internal fun readSessionBatteryBaseline(generation: Long): SessionBatteryReading? =
+    nativeLock.withLock {
+      sessionBatteryBaseline.takeIf {
+        generation == sessionBatteryGeneration && generation == _state.value.generation
+      }
+    }
+
+  private fun onStatisticsState(value: String) {
+    val parts = value.split(':', limit = 2)
+    val revision = parts.getOrNull(0)?.toLongOrNull()
+    val page = parts.getOrNull(1)?.toIntOrNull()
+    if (revision == null || page == null || page !in 0..8) {
+      Log.w(TAG, "Invalid statistics state from mpv: $value")
+      return
+    }
+    synchronized(statisticsStateLock) {
+      if (!statisticsSelectionRequested || revision != statisticsRevision) return
+      _visibleStatisticsPage.value = page
+      advancedPreferences.enabledStatisticsPage.set(page)
+      updateStatisticsDiagnostics(page)
+    }
+  }
+
+  fun scrollStatisticsPage(lines: Int) {
+    if (lines == 0) return
+    val revision = synchronized(statisticsStateLock) { statisticsRevision }
+    statisticsCommands.launch {
+      withReadyCore(Unit) {
+        val current = synchronized(statisticsStateLock) { revision == statisticsRevision }
+        val page = _visibleStatisticsPage.value
+        if (current && page in scrollableStatisticsPages && advancedPreferences.enabledStatisticsPage.get() == page) {
+          MPVLib.command("script-message", "mpvrx-stats-scroll", lines.coerceIn(-100, 100).toString())
+        }
+      }
+    }
+  }
+
+  private fun updateStatisticsDiagnostics(page: Int) {
+    if (page != 6) {
+      statisticsDiagnosticsJob?.cancel()
+      statisticsDiagnosticsJob = null
+    } else if (statisticsDiagnosticsJob?.isActive != true) {
+      val context = checkNotNull(applicationContext) { "Statistics require an initialized application context" }
+      val core = nativeObserver
+      statisticsDiagnosticsJob = statisticsDiagnostics.launch {
+        val diagnostics = StatisticsDiagnostics(context, playerPreferences, decoderPreferences)
+        while (isActive && _visibleStatisticsPage.value == 6 && advancedPreferences.enabledStatisticsPage.get() == 6) {
+          val state = _state.value
+          val sample = diagnostics.sample(state).toString()
+          withReadyCore(Unit) {
+            if (isActive && nativeObserver === core && _state.value.generation == state.generation &&
+              _visibleStatisticsPage.value == 6 &&
+              advancedPreferences.enabledStatisticsPage.get() == 6
+            ) {
+              MPVLib.setPropertyString(STATISTICS_ANDROID_PROPERTY, sample)
+            }
+          }
+          delay(if (state.paused) 2_000L else 1_000L)
+        }
+      }
+    }
   }
 
   internal fun removeVideoFilter(label: String) {
@@ -2488,6 +2587,14 @@ internal fun userScriptsNeedReload(currentKey: String): Boolean {
     property: String,
     value: MPVNode,
   ) {
+    if (property == STATISTICS_STATE_PROPERTY) {
+      val state = value.asString()
+      if (state != null) {
+        onStatisticsState(state)
+      } else if (value !== MPVNode.None) {
+        Log.w(TAG, "Invalid statistics state node from mpv")
+      }
+    }
     propNode.emit(property, value)
     if (property == "audio-params" || property == "audio-out-params") applySpatialAudioLocked()
     observerSnapshot().forEach { observer -> runCatching { observer.eventProperty(property, value) } }
@@ -2508,6 +2615,7 @@ internal fun userScriptsNeedReload(currentKey: String): Boolean {
             // attributed to the latest requested generation.
             if (_state.value.phase != PlaybackPhase.STOPPING) {
               updateState { it.copy(phase = PlaybackPhase.LOADING, activeGeneration = it.generation) }
+              beginSessionBatteryMeasurementLocked(_state.value.generation)
               applySpatialAudioLocked()
             }
             if (supersededStopGeneration != 0L && _state.value.generation > supersededStopGeneration) {

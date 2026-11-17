@@ -4726,19 +4726,6 @@ class PlayerActivity :
         handlePauseStateChange(value)
       }
       "eof-reached" -> handleEndOfFile(value)
-      "user-data/mpv/console/open" -> {
-        // Keep the selection in step with the console without sending blind toggles; the
-        // coordinator skips any mpv command the console state has already satisfied.
-        if (!value) {
-          if (advancedPreferences.enabledStatisticsPage.get() == 7) {
-            PlaybackSession.setStatisticsPage(0)
-          }
-        } else {
-          if (advancedPreferences.enabledStatisticsPage.get() != 7) {
-            PlaybackSession.setStatisticsPage(7)
-          }
-        }
-      }
     }
   }
 
