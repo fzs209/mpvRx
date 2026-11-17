@@ -640,7 +640,6 @@ class MPVView(
     pendingStartupShaders = null
 
     if (FongMiMpv.isBuildSupported) {
-      applyProfile8Hdr10Fallback()
       PlaybackSession.loadManagedUserScripts(
         MpvScriptAssets.autoloadEntries(context.filesDir),
         advancedPreferences.mpvConfStorageUri.get(),
