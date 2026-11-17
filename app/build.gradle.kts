@@ -479,7 +479,14 @@ dependencies {
   "standardImplementation"(variantOf(libs.mpvlib.standard) { artifactType("aar") })
   "playstoreImplementation"(variantOf(libs.mpvlib.standard) { artifactType("aar") })
   "noVulkanImplementation"(variantOf(libs.mpvlib.no.vulkan) { artifactType("aar") })
-  "fongmiImplementation"(variantOf(libs.mpvlib.fongmi) { artifactType("aar") })
+  // CI builds a FongMi AAR with the native Dolby Vision sink-mode fix. Keep the
+  // published AAR as the local-development fallback when no patched AAR is staged.
+  val patchedFongMiAar = file("libs/mpvlib-fongmi-patched.aar")
+  if (patchedFongMiAar.isFile) {
+    "fongmiImplementation"(files(patchedFongMiAar))
+  } else {
+    "fongmiImplementation"(variantOf(libs.mpvlib.fongmi) { artifactType("aar") })
+  }
 
   // Network protocol libraries
   implementation(libs.smbj)
