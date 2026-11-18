@@ -78,9 +78,13 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.BlendMode
+import androidx.compose.ui.graphics.CompositingStrategy
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
@@ -89,6 +93,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.LayoutDirection
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -109,6 +114,14 @@ import app.gyrolet.mpvrx.ui.theme.ConnectedLayout
 import app.gyrolet.mpvrx.ui.theme.rememberConnectedShape
 import app.gyrolet.mpvrx.ui.theme.animatedConnectedContainerColor
 import app.gyrolet.mpvrx.ui.theme.appPressFeedback
+import dev.chrisbanes.haze.HazeInput
+import dev.chrisbanes.haze.HazeProgressive
+import dev.chrisbanes.haze.HazeState
+import dev.chrisbanes.haze.blur.HazeBlurStyle
+import dev.chrisbanes.haze.blur.HazeColorEffect
+import dev.chrisbanes.haze.blur.hazeBlur
+import dev.chrisbanes.haze.hazeSource
+import dev.chrisbanes.haze.rememberHazeState
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.isActive
 import org.koin.compose.koinInject
@@ -199,6 +212,8 @@ fun LyricsView(
   }
 
   val hasEmbedded = state.embeddedLyrics != null && state.embeddedLyrics?.isValid() == true
+  val hasLyrics = state.lyrics?.let { !it.synced.isNullOrEmpty() || !it.plain.isNullOrEmpty() } == true
+  val lyricsBackdrop = rememberHazeState()
 
   Surface(
     modifier = modifier
@@ -215,7 +230,8 @@ fun LyricsView(
       Box(
         modifier = Modifier
           .fillMaxSize()
-          .onSizeChanged { lyricsViewportPx = it.height },
+          .onSizeChanged { lyricsViewportPx = it.height }
+          .then(if (hasLyrics) Modifier.hazeSource(lyricsBackdrop).lyricsEdgeFade() else Modifier),
         contentAlignment = Alignment.Center,
       ) {
         val activeLyrics = state.lyrics
@@ -571,6 +587,22 @@ fun LyricsView(
         }
       }
 
+      if (hasLyrics && lyricsViewportPx > 0) {
+        val edgeHeight = with(density) { (lyricsViewportPx * 0.22f).toDp().coerceAtMost(96.dp) }
+        LyricsEdgeVignette(
+          backdrop = lyricsBackdrop,
+          height = edgeHeight,
+          atTop = true,
+          modifier = Modifier.align(Alignment.TopCenter),
+        )
+        LyricsEdgeVignette(
+          backdrop = lyricsBackdrop,
+          height = edgeHeight,
+          atTop = false,
+          modifier = Modifier.align(Alignment.BottomCenter),
+        )
+      }
+
       // Optional title and source chips sit on top of the lyrics.
       Column(
         modifier = Modifier
@@ -867,6 +899,67 @@ fun LyricsView(
     )
   }
 }
+
+@Composable
+private fun LyricsEdgeVignette(
+  backdrop: HazeState,
+  height: Dp,
+  atTop: Boolean,
+  modifier: Modifier = Modifier,
+) {
+  val surface = MaterialTheme.colorScheme.surface
+  val style = remember(surface, atTop) {
+    HazeBlurStyle {
+      blurRadius(8.dp)
+      noiseFactor(0f)
+      backgroundColor(surface)
+      colorEffects(listOf(HazeColorEffect.tint(surface.copy(alpha = 0.08f))))
+      fallbackColorEffect(HazeColorEffect.tint(surface.copy(alpha = 0.5f)))
+      alpha(0.24f)
+      progressive(
+        HazeProgressive.verticalGradient(
+          startIntensity = if (atTop) 1f else 0f,
+          endIntensity = if (atTop) 0f else 1f,
+        ),
+      )
+      mask(
+        Brush.verticalGradient(
+          0f to Color.Transparent,
+          (if (atTop) 0.18f else 0.5f) to Color.White.copy(alpha = if (atTop) 0.55f else 0.35f),
+          (if (atTop) 0.5f else 0.82f) to Color.White.copy(alpha = if (atTop) 0.35f else 0.55f),
+          1f to Color.Transparent,
+        ),
+      )
+    }
+  }
+  Box(
+    modifier.fillMaxWidth().height(height)
+      .hazeBlur(input = HazeInput.Sources(backdrop), style = style),
+  )
+}
+
+private fun Modifier.lyricsEdgeFade(): Modifier =
+  graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
+    .drawWithCache {
+      val edge = minOf(0.22f, 96.dp.toPx() / size.height)
+      // Smoothstep samples soften the start and end of each fade.
+      val mask = Brush.verticalGradient(
+        0f to Color.Transparent,
+        edge * 0.25f to Color.White.copy(alpha = 0.15625f),
+        edge * 0.5f to Color.White.copy(alpha = 0.5f),
+        edge * 0.75f to Color.White.copy(alpha = 0.84375f),
+        edge to Color.White,
+        1f - edge to Color.White,
+        1f - edge * 0.75f to Color.White.copy(alpha = 0.84375f),
+        1f - edge * 0.5f to Color.White.copy(alpha = 0.5f),
+        1f - edge * 0.25f to Color.White.copy(alpha = 0.15625f),
+        1f to Color.Transparent,
+      )
+      onDrawWithContent {
+        drawContent()
+        drawRect(mask, blendMode = BlendMode.DstIn)
+      }
+    }
 
 /**
  * The backing voice of a line: smaller and dimmer than the lead, swept word by

@@ -1659,10 +1659,9 @@ object SearchablePreferences {
         anchorItemIndex = 7,
         SearchEntrySpec(R.string.pref_nav_music_title, listOf("music", "audio", "tab", "navigation")),
         SearchEntrySpec(R.string.pref_nav_profile_title, listOf("profile", "you", "library", "tab", "navigation")),
-        SearchEntrySpec(R.string.profile_layout_title, listOf("profile", "customize", "layout", "reorder", "hide", "cards")),
-        SearchEntrySpec(R.string.profile_layout_hubs, listOf("profile", "hub", "recents", "playlists", "snapshots", "network")),
+        SearchEntrySpec(R.string.profile_layout_title, listOf("profile", "customize", "layout", "reorder", "hide", "sections")),
         SearchEntrySpec(R.string.profile_layout_sections, listOf("profile", "sections", "order", "visibility")),
-        SearchEntrySpec(R.string.profile_layout_statistics, listOf("profile", "statistics", "watch time", "most played", "weekly", "cards")),
+        SearchEntrySpec(R.string.profile_recently_added, listOf("profile", "recently added", "new", "videos", "shelf"), R.string.profile_layout_sections),
         SearchEntrySpec(R.string.navbar_glow_title, listOf("glass", "glow", "navbar", "rim", "highlight", "liquid glass")),
         SearchEntrySpec(
           R.string.legacy_navigation_bar_title,
@@ -1853,7 +1852,12 @@ object SearchablePreferences {
         SearchEntrySpec(R.string.pref_audio_ambient_mode_title, listOf("audio", "ambient", "background", "visualizer")),
         SearchEntrySpec(R.string.pref_audio_immersive_artwork_title, listOf("audio", "music", "immersive", "artwork", "album", "cover", "background")),
         SearchEntrySpec(R.string.pref_audio_wavy_seekbar_title, listOf("audio", "wavy", "seekbar", "visualizer", "animation", "wave")),
-        SearchEntrySpec(R.string.pref_audio_animated_artwork_title, listOf("audio", "music", "animated", "artwork", "album", "cover", "apple")),
+        SearchEntrySpec(R.string.pref_audio_animated_artwork_title, listOf("audio", "music", "animated", "artwork", "album", "cover", "apple", "tidal", "spotify", "canvas", "motion")),
+        SearchEntrySpec(R.string.pref_audio_animated_artwork_apple_music_title, listOf("audio", "music", "animated", "artwork", "apple", "motion", "cover")),
+        SearchEntrySpec(R.string.pref_audio_animated_artwork_tidal_title, listOf("audio", "music", "animated", "artwork", "tidal", "video", "cover")),
+        SearchEntrySpec(R.string.pref_tidal_client_id, listOf("tidal", "client", "id", "developer", "credentials", "artwork")),
+        SearchEntrySpec(R.string.pref_tidal_client_secret, listOf("tidal", "client", "secret", "developer", "credentials", "artwork")),
+        SearchEntrySpec(R.string.pref_audio_animated_artwork_spotify_canvas_title, listOf("audio", "music", "animated", "artwork", "spotify", "canvas", "background", "paxsenix")),
       )
       addSearchEntries(
         category = "Audio",
@@ -2390,6 +2394,7 @@ object SearchablePreferences {
       R.string.pref_lyrics_target_language,
       R.string.pref_lyrics_display_mode,
       R.string.pref_paxsenix_api_key,
+      R.string.pref_audio_animated_artwork_spotify_canvas_title,
     )
 
   // Play builds omit AI, P2P and lyrics translation, so their settings must not surface.

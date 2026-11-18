@@ -57,6 +57,7 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -121,6 +122,7 @@ import androidx.compose.runtime.setValue
 import kotlinx.coroutines.launch
 import androidx.palette.graphics.Palette
 import app.gyrolet.mpvrx.data.artwork.MotionArtworkQuery
+import app.gyrolet.mpvrx.data.artwork.MotionArtworkSurface
 import app.gyrolet.mpvrx.database.repository.PlaylistRepository
 import app.gyrolet.mpvrx.repository.JellyfinRepository
 import app.gyrolet.mpvrx.repository.NavidromeRepository
@@ -203,6 +205,7 @@ import app.gyrolet.mpvrx.preferences.preference.collectAsState
 import app.gyrolet.mpvrx.ui.icons.Icon
 import app.gyrolet.mpvrx.ui.icons.AnimatedIcon
 import app.gyrolet.mpvrx.ui.theme.AppMotion
+import app.gyrolet.mpvrx.ui.theme.DarkMode
 import app.gyrolet.mpvrx.ui.theme.appPressFeedback
 import app.gyrolet.mpvrx.ui.icons.Icons
 import app.gyrolet.mpvrx.ui.player.Panels
@@ -662,6 +665,8 @@ private fun CoverArtCardImage(
   motionArtwork: ByteArray? = null,
   isPlaying: Boolean = false,
   remoteMotionQuery: MotionArtworkQuery? = null,
+  remoteMotionSurface: MotionArtworkSurface = MotionArtworkSurface.COVER,
+  modifier: Modifier = Modifier,
 ) {
   val context = LocalContext.current
   val client = org.koin.compose.koinInject<okhttp3.OkHttpClient>()
@@ -688,7 +693,7 @@ private fun CoverArtCardImage(
   val imageBitmap = remember(finalBitmap) { finalBitmap?.asImageBitmap() }
   val animatedDrawable = rememberMotionArtworkDrawable(motionArtwork)
 
-  Box(Modifier.fillMaxSize()) {
+  Box(modifier.fillMaxSize()) {
     if (animatedDrawable != null) {
       MotionArtworkImage(
         drawable = animatedDrawable,
@@ -719,12 +724,29 @@ private fun CoverArtCardImage(
     if (remoteMotionQuery != null && animatedDrawable == null) {
       RemoteMotionArtwork(
         query = remoteMotionQuery,
+        surface = remoteMotionSurface,
         isPlaying = isPlaying,
         modifier = Modifier.fillMaxSize(),
       )
     }
   }
 }
+
+private fun Modifier.artworkHeaderVignette(surfaceColor: Color, height: Dp): Modifier =
+  drawWithCache {
+    val shade = Brush.verticalGradient(
+      0f to surfaceColor.copy(alpha = 0.26f),
+      0.25f to surfaceColor.copy(alpha = 0.22f),
+      0.5f to surfaceColor.copy(alpha = 0.13f),
+      0.75f to surfaceColor.copy(alpha = 0.04f),
+      1f to surfaceColor.copy(alpha = 0f),
+      endY = height.toPx().coerceAtMost(size.height),
+    )
+    onDrawWithContent {
+      drawContent()
+      drawRect(shade)
+    }
+  }
 
 @Composable
 private fun ImmersiveArtworkBackground(
@@ -733,6 +755,7 @@ private fun ImmersiveArtworkBackground(
   motionArtwork: ByteArray?,
   remoteMotionQuery: MotionArtworkQuery?,
   isPlaying: Boolean,
+  landscape: Boolean,
   swipeOffset: androidx.compose.runtime.State<Float>,
   previousBitmap: Bitmap?,
   previousArtworkUrl: String?,
@@ -752,17 +775,29 @@ private fun ImmersiveArtworkBackground(
     }
   }
   BoxWithConstraints(Modifier.fillMaxSize().clipToBounds()) {
-    val artworkHeight = minOf(maxHeight * 0.64f, maxWidth * 1.7f)
+    val artworkHeight = if (landscape) maxHeight else minOf(maxHeight * 0.64f, maxWidth * 1.7f)
     val viewportWidth = constraints.maxWidth.toFloat()
     Box(
       Modifier.fillMaxWidth().height(artworkHeight)
         .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
         .drawWithCache {
-          val artworkMask = Brush.verticalGradient(
-            0f to Color.White,
-            0.48f to Color.White,
-            1f to Color.Transparent,
-          )
+          val artworkMask = if (landscape) {
+            val rtl = layoutDirection == LayoutDirection.Rtl
+            Brush.horizontalGradient(
+              0f to Color.White,
+              0.22f to Color.White,
+              0.50f to Color.White.copy(alpha = 0.12f),
+              1f to Color.Transparent,
+              startX = if (rtl) size.width else 0f,
+              endX = if (rtl) 0f else size.width,
+            )
+          } else {
+            Brush.verticalGradient(
+              0f to Color.White,
+              0.48f to Color.White,
+              1f to Color.Transparent,
+            )
+          }
           onDrawWithContent {
             drawContent()
             drawRect(artworkMask, blendMode = BlendMode.DstIn)
@@ -800,6 +835,8 @@ private fun ImmersiveArtworkBackground(
           artworkUrl = artworkUrl,
           motionArtwork = motionArtwork.takeUnless { reducedMotion },
           remoteMotionQuery = remoteMotionQuery.takeUnless { reducedMotion },
+          // Landscape keeps the square side-by-side cover, where a portrait Canvas would be cropped away.
+          remoteMotionSurface = if (landscape) MotionArtworkSurface.COVER else MotionArtworkSurface.BACKGROUND,
           isPlaying = isPlaying && !reducedMotion,
         )
       }
@@ -1348,9 +1385,19 @@ fun AudioPlayerControls(
     if (flushInPlaceLyrics) Modifier.padding(start = 16.dp, top = 6.dp, end = 16.dp) else Modifier
   // Visibility-independent insets keep the layout still while bars re-dispatch on resume.
   val stableInsets = WindowInsets.systemBarsIgnoringVisibility.union(WindowInsets.displayCutout)
-  val showImmersiveArtwork = !isTablet && immersiveArtworkEnabled && isPortrait && !showVisualizer && !showInPlaceLyrics &&
+  val showImmersiveArtwork = !isTablet && immersiveArtworkEnabled && !showVisualizer && !showInPlaceLyrics &&
     (albumArtBitmap != null || !currentArtworkUri.isNullOrBlank() ||
       currentAudioPresentation?.motionArtwork != null || motionQuery != null)
+  // PlayerActivity uses light status-bar icons; the in-app player follows the app's bar style.
+  val useLightImmersiveHeaderContent =
+    if (showImmersiveArtwork && inAppSheet != null) {
+      val darkMode by appearancePreferences.darkMode.collectAsState()
+      val systemDark = isSystemInDarkTheme()
+      darkMode == DarkMode.Dark || (darkMode == DarkMode.System && systemDark)
+    } else {
+      true
+    }
+  val immersiveHeaderContentColor = if (useLightImmersiveHeaderContent) Color.White else Color.Black
   val immersiveSurface by animateColorAsState(
     targetValue = if (showImmersiveArtwork) {
       Color(ColorUtils.blendARGB(colorScheme.surface.toArgb(), artworkPalette.primary, 0.10f))
@@ -1367,7 +1414,7 @@ fun AudioPlayerControls(
   }
   val animatableOffsetX = remember { Animatable(0f) }
   val haptic = rememberAppHaptics()
-  LaunchedEffect(queueState.currentItem?.queueEntryId, showImmersiveArtwork) {
+  LaunchedEffect(queueState.currentItem?.queueEntryId, showImmersiveArtwork, isPortrait) {
     animatableOffsetX.snapTo(0f)
   }
   val nextItem = remember(queueState) { PlaybackQueueReducer.peekNext(queueState) }
@@ -1414,6 +1461,7 @@ fun AudioPlayerControls(
         motionArtwork = currentAudioPresentation?.motionArtwork?.takeIf { activeCoverOverride == null },
         remoteMotionQuery = motionQuery?.takeIf { activeCoverOverride == null },
         isPlaying = isPlaying,
+        landscape = !isPortrait,
         swipeOffset = animatableOffsetX.asState(),
         previousBitmap = swipePrevCoverBitmap,
         previousArtworkUrl = prevItem?.artworkUri?.takeIf {
@@ -1425,6 +1473,28 @@ fun AudioPlayerControls(
         },
         hasPrevious = prevItem != null,
         hasNext = nextItem != null,
+      )
+    }
+    if (showImmersiveArtwork) {
+      val topInset = with(LocalDensity.current) { stableInsets.getTop(this).toDp() }
+      val protectedHeight = topInset + 54.dp
+      val vignetteHeight = protectedHeight + if (isPortrait) 112.dp else 72.dp
+      val fadeStart = protectedHeight / vignetteHeight
+      val shadeColor = if (useLightImmersiveHeaderContent) Color.Black else Color.White
+      val vignette = remember(shadeColor, fadeStart) {
+        Brush.verticalGradient(
+          0f to shadeColor.copy(alpha = 0.78f),
+          fadeStart to shadeColor.copy(alpha = 0.68f),
+          (fadeStart + (1f - fadeStart) * 0.5f) to shadeColor.copy(alpha = 0.24f),
+          1f to shadeColor.copy(alpha = 0f),
+        )
+      }
+      Box(Modifier.fillMaxWidth().height(vignetteHeight).background(vignette))
+    } else if (!showVisualizer && !showInPlaceLyrics) {
+      val headerFadeHeight = with(LocalDensity.current) { stableInsets.getTop(this).toDp() } + 144.dp
+      Box(
+        Modifier.fillMaxWidth().height(headerFadeHeight)
+          .artworkHeaderVignette(immersiveSurface, headerFadeHeight),
       )
     }
     BoxWithConstraints(
@@ -1500,7 +1570,7 @@ fun AudioPlayerControls(
             Icon(
               imageVector = if (showInPlaceLyrics || isLyricsFullscreen) Icons.RoundedFilled.ArrowBack else Icons.RoundedFilled.ExpandMore,
               contentDescription = stringResource(if (showInPlaceLyrics || isLyricsFullscreen) R.string.back else R.string.ui_close),
-              tint = MaterialTheme.colorScheme.onSurface,
+              tint = if (showImmersiveArtwork) immersiveHeaderContentColor else MaterialTheme.colorScheme.onSurface,
               modifier = Modifier.size(if (showInPlaceLyrics || isLyricsFullscreen) 28.dp else 32.dp),
             )
           }
@@ -1510,7 +1580,12 @@ fun AudioPlayerControls(
               "${audioFormatInfo.codecLabel} · $qualityLabel"
             } else stringResource(R.string.ui_now_playing),
             style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            color =
+              if (showImmersiveArtwork) {
+                immersiveHeaderContentColor.copy(alpha = 0.92f)
+              } else {
+                MaterialTheme.colorScheme.onSurfaceVariant
+              },
             letterSpacing = 2.sp,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
@@ -1526,7 +1601,7 @@ fun AudioPlayerControls(
               Icon(
                 imageVector = Icons.RoundedFilled.Info,
                 contentDescription = stringResource(R.string.player_sheets_more_title),
-                tint = MaterialTheme.colorScheme.onSurface,
+                tint = if (showImmersiveArtwork) immersiveHeaderContentColor else MaterialTheme.colorScheme.onSurface,
                 modifier = Modifier.size(28.dp),
               )
             }
@@ -1630,14 +1705,14 @@ fun AudioPlayerControls(
                 modifier = Modifier
                   .fillMaxHeight()
                   .fillMaxWidth(if (isTablet) (if (isTabletPortrait) 0.92f else 0.88f) else if (isPortrait) 0.88f else 1f)
-                  .pointerInput(viewModel, queueState, showVisualizer, stride, showImmersiveArtwork, isAudiobook) {
+                  .pointerInput(viewModel, queueState, showVisualizer, stride, showImmersiveArtwork, isAudiobook, isPortrait, containerWidthPx) {
                     if (showVisualizer || isAudiobook || swipeWidth <= 0f) return@pointerInput
                     detectHorizontalDragGestures(
                       onDragStart = {
                         coroutineScope.launch { animatableOffsetX.stop() }
                       },
                       onDragEnd = {
-                        val threshold = swipeWidth * 0.25f
+                        val threshold = (if (showImmersiveArtwork && !isPortrait) containerWidthPx else swipeWidth) * 0.25f
                         val dragVal = animatableOffsetX.value
                         coroutineScope.launch {
                           if (dragVal < -threshold && nextItem != null) {
@@ -1712,6 +1787,7 @@ fun AudioPlayerControls(
                         it.isNotBlank() && !isLocalArtworkSource(prevItem.originalUri)
                       },
                       contentScale = if (isAudiobook) ContentScale.Fit else ContentScale.Crop,
+                      modifier = Modifier.artworkHeaderVignette(immersiveSurface, 120.dp),
                     )
                   }
                 }
@@ -1732,6 +1808,7 @@ fun AudioPlayerControls(
                         it.isNotBlank() && !isLocalArtworkSource(nextItem.originalUri)
                       },
                       contentScale = if (isAudiobook) ContentScale.Fit else ContentScale.Crop,
+                      modifier = Modifier.artworkHeaderVignette(immersiveSurface, 120.dp),
                     )
                   }
                 }
@@ -1755,6 +1832,7 @@ fun AudioPlayerControls(
                       remoteMotionQuery = motionQuery?.takeIf {
                         activeCoverOverride == null && !showVisualizer && !showInPlaceLyrics
                       },
+                      modifier = Modifier.artworkHeaderVignette(immersiveSurface, 120.dp),
                     )
 
                     if (isAudioOnly && !isAudiobook && activeCoverOverride == null) {
@@ -2460,9 +2538,22 @@ fun AudioPlayerControls(
             else -> 60.dp
           }
         val sideIconSize = if (isCompactLandscape || isAudiobook) 24.dp else 28.dp
+        val controlSpacing = if (isCompactLandscape || isAudiobook) 10.dp else 18.dp
+        val controlPadding = if (isPortrait || isTablet) 8.dp else 0.dp
+        val halfWidth = !isPortrait && !isAudiobook
         Row(
-          modifier = Modifier.fillMaxWidth().padding(horizontal = if (isPortrait || isTablet) 8.dp else 0.dp),
-          horizontalArrangement = Arrangement.spacedBy(if (isCompactLandscape || isAudiobook) 10.dp else 18.dp),
+          modifier = Modifier
+            .then(
+              // Preserve usable touch targets when a narrow pane cannot fit the half-width row.
+              if (halfWidth) {
+                Modifier.widthIn(min = maxOf(sideSize, 48.dp) * 2 + 48.dp + controlSpacing * 2 + controlPadding * 2)
+              } else {
+                Modifier
+              },
+            )
+            .fillMaxWidth(if (halfWidth) 0.5f else 1f)
+            .padding(horizontal = controlPadding),
+          horizontalArrangement = Arrangement.spacedBy(controlSpacing),
           verticalAlignment = Alignment.CenterVertically,
         ) {
           ExpressiveTransportSideButton(

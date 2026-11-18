@@ -19,6 +19,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -58,7 +59,6 @@ import app.gyrolet.mpvrx.preferences.BrowserPreferences
 import app.gyrolet.mpvrx.preferences.MediaLibraryType
 import app.gyrolet.mpvrx.preferences.PlayerPreferences
 import app.gyrolet.mpvrx.preferences.preference.collectAsState
-import app.gyrolet.mpvrx.presentation.Screen
 import app.gyrolet.mpvrx.ui.preferences.components.SwitchPreference
 import app.gyrolet.mpvrx.ui.utils.LocalBackStack
 import app.gyrolet.mpvrx.ui.utils.currentMpvConfigOverrideOptions
@@ -74,7 +74,7 @@ import androidx.compose.runtime.setValue
 import app.gyrolet.mpvrx.ui.browser.music.MusicTab
 
 @Serializable
-object AudioPreferencesScreen : Screen {
+object AudioPreferencesScreen : ScrollableSettingsScreen {
   @OptIn(ExperimentalMaterial3Api::class)
   @Composable
   override fun Content() {
@@ -106,6 +106,7 @@ object AudioPreferencesScreen : Screen {
           rememberSettingsSearchList(AudioPreferencesScreen, MaterialTheme.colorScheme.primary)
         LazyColumn(
           state = settingsListState,
+          contentPadding = settingsContentPadding(),
           modifier =
             Modifier
               .fillMaxSize()
@@ -422,6 +423,134 @@ object AudioPreferencesScreen : Screen {
                   )
                 },
               )
+
+              PreferenceDivider()
+              val animatedArtworkAppleMusic by preferences.animatedArtworkAppleMusic.collectAsState()
+              SwitchPreference(
+                modifier = Modifier.settingsSearchTarget(R.string.pref_audio_animated_artwork_apple_music_title),
+                value = animatedArtworkAppleMusic,
+                onValueChange = { preferences.animatedArtworkAppleMusic.set(it) },
+                enabled = animatedAlbumArtwork,
+                title = { Text(stringResource(R.string.pref_audio_animated_artwork_apple_music_title)) },
+                summary = {
+                  Text(
+                    stringResource(R.string.pref_audio_animated_artwork_apple_music_summary),
+                    color = MaterialTheme.colorScheme.outline,
+                  )
+                },
+              )
+
+              PreferenceDivider()
+              val animatedArtworkTidal by preferences.animatedArtworkTidal.collectAsState()
+              val tidalClientId by preferences.tidalClientId.collectAsState()
+              val tidalClientSecret by preferences.tidalClientSecret.collectAsState()
+              SwitchPreference(
+                modifier = Modifier.settingsSearchTarget(R.string.pref_audio_animated_artwork_tidal_title),
+                value = animatedArtworkTidal,
+                onValueChange = { preferences.animatedArtworkTidal.set(it) },
+                enabled = animatedAlbumArtwork,
+                title = { Text(stringResource(R.string.pref_audio_animated_artwork_tidal_title)) },
+                summary = {
+                  Text(
+                    stringResource(
+                      if (tidalClientId.isNotBlank() && tidalClientSecret.isNotBlank()) {
+                        R.string.pref_audio_animated_artwork_tidal_summary
+                      } else {
+                        R.string.pref_audio_animated_artwork_tidal_needs_credentials
+                      },
+                    ),
+                    color = MaterialTheme.colorScheme.outline,
+                  )
+                },
+              )
+
+              PreferenceDivider()
+              ExpressivePreferenceItem {
+                TextFieldPreference(
+                  modifier = Modifier.settingsSearchTarget(R.string.pref_tidal_client_id),
+                  value = tidalClientId,
+                  onValueChange = { preferences.tidalClientId.set(it) },
+                  textToValue = { it.trim() },
+                  enabled = animatedAlbumArtwork && animatedArtworkTidal,
+                  title = { Text(stringResource(R.string.pref_tidal_client_id)) },
+                  summary = {
+                    Text(
+                      text = tidalClientId.ifBlank { stringResource(R.string.pref_tidal_credentials_not_set) },
+                      color = MaterialTheme.colorScheme.outline,
+                    )
+                  },
+                  textField = { value, onValueChange, _ ->
+                    Column {
+                      Text(stringResource(R.string.pref_tidal_credentials_dialog_desc))
+                      TextField(
+                        value = value,
+                        onValueChange = onValueChange,
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                      )
+                    }
+                  },
+                )
+              }
+
+              PreferenceDivider()
+              ExpressivePreferenceItem {
+                TextFieldPreference(
+                  modifier = Modifier.settingsSearchTarget(R.string.pref_tidal_client_secret),
+                  value = tidalClientSecret,
+                  onValueChange = { preferences.tidalClientSecret.set(it) },
+                  textToValue = { it.trim() },
+                  enabled = animatedAlbumArtwork && animatedArtworkTidal,
+                  title = { Text(stringResource(R.string.pref_tidal_client_secret)) },
+                  summary = {
+                    Text(
+                      text = if (tidalClientSecret.isBlank()) {
+                        stringResource(R.string.pref_tidal_credentials_not_set)
+                      } else {
+                        stringResource(R.string.pref_tidal_client_secret_set)
+                      },
+                      color = MaterialTheme.colorScheme.outline,
+                    )
+                  },
+                  textField = { value, onValueChange, _ ->
+                    Column {
+                      Text(stringResource(R.string.pref_tidal_credentials_dialog_desc))
+                      TextField(
+                        value = value,
+                        onValueChange = onValueChange,
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        visualTransformation = PasswordVisualTransformation(),
+                      )
+                    }
+                  },
+                )
+              }
+
+              if (!app.gyrolet.mpvrx.BuildConfig.IS_PLAY_STORE_BUILD) {
+                PreferenceDivider()
+                val animatedArtworkSpotifyCanvas by preferences.animatedArtworkSpotifyCanvas.collectAsState()
+                val canvasApiKey by preferences.paxsenixApiKey.collectAsState()
+                SwitchPreference(
+                  modifier = Modifier.settingsSearchTarget(R.string.pref_audio_animated_artwork_spotify_canvas_title),
+                  value = animatedArtworkSpotifyCanvas,
+                  onValueChange = { preferences.animatedArtworkSpotifyCanvas.set(it) },
+                  enabled = animatedAlbumArtwork,
+                  title = { Text(stringResource(R.string.pref_audio_animated_artwork_spotify_canvas_title)) },
+                  summary = {
+                    Text(
+                      stringResource(
+                        if (canvasApiKey.isNotBlank()) {
+                          R.string.pref_audio_animated_artwork_spotify_canvas_summary
+                        } else {
+                          R.string.pref_audio_animated_artwork_spotify_canvas_needs_key
+                        },
+                      ),
+                      color = MaterialTheme.colorScheme.outline,
+                    )
+                  },
+                )
+              }
             }
           }
 
@@ -682,18 +811,28 @@ object AudioPreferencesScreen : Screen {
 
               PreferenceDivider()
               val audioOutput by preferences.audioOutput.collectAsState()
+              val audioPassthrough by preferences.audioPassthrough.collectAsState()
+              // Passthrough needs AudioTrack, so it overrides this choice while it's on.
+              val passthroughOwnsOutput = audioPassthrough != AudioPassthrough.Off &&
+                "audio-spdif" !in configOwnedOptions
               ExpressivePreferenceItem {
               ListPreference(
                 modifier = Modifier.settingsSearchTarget(R.string.pref_audio_output_title),
                 value = audioOutput,
                 onValueChange = { preferences.audioOutput.set(it) },
                 values = AudioOutput.entries,
-                enabled = "ao" !in configOwnedOptions,
+                enabled = "ao" !in configOwnedOptions && !passthroughOwnsOutput,
                 valueToText = { AnnotatedString(resources.getString(it.titleRes)) },
                 title = { Text(stringResource(R.string.pref_audio_output_title)) },
                 summary = {
                   Text(
-                    text = stringResource(audioOutput.titleRes),
+                    text = stringResource(
+                      if (passthroughOwnsOutput && "ao" !in configOwnedOptions) {
+                        R.string.pref_audio_output_passthrough
+                      } else {
+                        audioOutput.titleRes
+                      },
+                    ),
                     color = MaterialTheme.colorScheme.outline,
                   )
                 },
@@ -701,7 +840,6 @@ object AudioPreferencesScreen : Screen {
               }
 
               PreferenceDivider()
-              val audioPassthrough by preferences.audioPassthrough.collectAsState()
               ExpressivePreferenceItem {
               ListPreference(
                 modifier = Modifier.settingsSearchTarget(R.string.pref_audio_passthrough_title),

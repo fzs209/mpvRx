@@ -37,7 +37,6 @@ val localProperties =
 
 val targetAbiProp = project.findProperty("targetAbi")?.toString() ?: localProperties.getProperty("targetAbi")
 val enableX86 = project.findProperty("enableX86") != "false"
-val isExperimentalBuild = project.findProperty("experimentalBuild")?.toString()?.toBoolean() == true
 val x86Abis = if (enableX86) listOf("x86", "x86_64") else emptyList()
 val activeAbis =
   if (!targetAbiProp.isNullOrBlank()) {
@@ -66,21 +65,10 @@ plugins {
   alias(libs.plugins.ksp)
   alias(libs.plugins.room)
   alias(libs.plugins.ktlint)
-  id("sh.measure.android.gradle") version "0.14.0" apply false
-}
-
-// Supply the ingestion key through a local Gradle property or the CI secret.
-val measureApiKey =
-  providers.gradleProperty("measureApiKey").orElse(providers.environmentVariable("MEASURE_API_KEY")).getOrElse("")
-if (measureApiKey.isNotBlank()) {
-  apply(plugin = "sh.measure.android.gradle")
 }
 
 androidComponents {
   onVariants(selector().all()) { variant ->
-    // Measure 0.14 only rewrites OkHttp through 5.3.2. Attach its public SDK hooks
-    // to our clients instead, preserving OkHttp 5.5 and avoiding duplicate instrumentation.
-    variant.instrumentation.excludes.add("okhttp3/OkHttpClient")
     variant.instrumentation.transformClassesWith(
       SmbRpcExceptionCompatibility::class.java,
       InstrumentationScope.ALL,
@@ -94,12 +82,9 @@ android {
   ndkVersion = "27.3.13750724"
 
   defaultConfig {
-    manifestPlaceholders["measureApiKey"] = measureApiKey
-    buildConfigField("boolean", "MEASURE_CONFIGURED", measureApiKey.isNotBlank().toString())
     applicationId = "com.fzs209.mpvrx"
     minSdk = 26
     targetSdk = 36
-    testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     // Stable occupies the top of its version band. Preview uses the next band's commit-count
     // offset, so Stable -> Preview -> newer Preview -> next Stable is always an Android upgrade.
     versionCode = stableVersionCode
@@ -249,8 +234,6 @@ android {
   buildTypes {
     named("release") {
       buildConfigField("boolean", "IS_PREVIEW_BUILD", "false")
-      buildConfigField("boolean", "IS_EXPERIMENTAL_BUILD", isExperimentalBuild.toString())
-      if (isExperimentalBuild) versionNameSuffix = "-exp.r${getCommitCount()}"
       isMinifyEnabled = true
       isShrinkResources = true
       proguardFiles(
@@ -268,13 +251,11 @@ android {
       initWith(getByName("release"))
       signingConfig = signingConfigs.getByName("debug")
       buildConfigField("boolean", "IS_PREVIEW_BUILD", "true")
-      buildConfigField("boolean", "IS_EXPERIMENTAL_BUILD", "false")
       versionNameSuffix = "-beta.r${getCommitCount()}"
     }
 
     named("debug") {
       buildConfigField("boolean", "IS_PREVIEW_BUILD", "false")
-      buildConfigField("boolean", "IS_EXPERIMENTAL_BUILD", "false")
       applicationIdSuffix = ".debug"
       versionNameSuffix = "-${getCommitCount()}"
       resValue("string", "app_name", "mpvRx-Debug")
@@ -341,7 +322,6 @@ androidComponents {
     // use the same history-derived code; rebuilding a commit keeps its identity stable.
     val isPlayStoreRelease =
       variant.buildType == "release" &&
-        !isExperimentalBuild &&
         variant.productFlavors.any { (dimension, flavor) ->
           dimension == "distribution" && flavor == "playstore"
         }
@@ -357,7 +337,7 @@ androidComponents {
       }
 
       val channelVersionCode =
-        if (variant.buildType == "preview" || (variant.buildType == "release" && isExperimentalBuild)) {
+        if (variant.buildType == "preview") {
           previewVersionCode
         } else {
           output.versionCode.orNull ?: stableVersionCode
@@ -414,9 +394,6 @@ configurations.configureEach {
 }
 
 dependencies {
-  implementation("sh.measure:measure-android:0.22.0")
-  androidTestImplementation(libs.androidx.test.runner)
-  androidTestImplementation(libs.androidx.test.ext.junit)
   implementation(libs.androidx.activity.compose)
   implementation(platform(libs.androidx.compose.bom))
   implementation(libs.androidx.ui)
@@ -424,9 +401,7 @@ dependencies {
   implementation(libs.androidsvg)
   implementation(libs.androidx.material3.android)
   implementation(libs.google.material)
-  implementation(libs.androidx.ui.tooling.preview)
   debugImplementation(libs.androidx.ui.tooling)
-  debugImplementation(libs.leakcanary.android)
   implementation(libs.bundles.compose.navigation3)
   implementation(libs.androidx.appcompat)
   implementation(libs.androidx.core.ktx)
@@ -452,7 +427,6 @@ dependencies {
 
   implementation(libs.room.runtime)
   ksp(libs.room.compiler)
-  implementation(libs.room.ktx)
 
   implementation(libs.kotlinx.immutable.collections)
   implementation(libs.kotlinx.serialization.json)

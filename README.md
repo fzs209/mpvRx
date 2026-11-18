@@ -30,7 +30,7 @@
 ## Showcase
 
 <div align="center">
-  <img src="fastlane/metadata/android/en-US/images/phoneScreenshots/tanjiro-playback.jpg" width="100%" alt="Video playback in mpvRx">
+  <img src="fastlane/metadata/android/en-US/images/phoneScreenshots/itsmpv.jpg" width="100%" alt="Video playback in mpvRx">
 </div>
 
 <div align="center">
@@ -44,7 +44,7 @@
 
 
 <div align="center">
-  <img src="fastlane/metadata/android/en-US/images/phoneScreenshots/pip.png" width="32%" alt="mpvRx picture-in-picture mode">
+  <img src="fastlane/metadata/android/en-US/images/phoneScreenshots/jellyfin.jpg" width="32%" alt="mpvRx picture-in-picture mode">
   <img src="fastlane/metadata/android/en-US/images/phoneScreenshots/music-player.jpg" width="32%" alt="mpvRx music player">
   <img src="fastlane/metadata/android/en-US/images/phoneScreenshots/about-screen.jpg" width="32%" alt="mpvRx About screen">
 </div>

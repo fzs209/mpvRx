@@ -121,6 +121,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.LifecycleResumeEffect
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import app.gyrolet.mpvrx.R
 import app.gyrolet.mpvrx.domain.framecapture.FrameCapture
@@ -129,7 +130,6 @@ import app.gyrolet.mpvrx.domain.thumbnail.ThumbnailRepository
 import app.gyrolet.mpvrx.preferences.AdvancedPreferences
 import app.gyrolet.mpvrx.preferences.AppearancePreferences
 import app.gyrolet.mpvrx.preferences.BrowserPreferences
-import app.gyrolet.mpvrx.preferences.ProfileHubCard
 import app.gyrolet.mpvrx.preferences.ProfileSection
 import app.gyrolet.mpvrx.preferences.visibleProfileItems
 import app.gyrolet.mpvrx.preferences.preference.collectAsState
@@ -141,6 +141,7 @@ import app.gyrolet.mpvrx.ui.browser.components.BrowserTopBar
 import app.gyrolet.mpvrx.ui.browser.components.rememberSwipePlaybackInfo
 import app.gyrolet.mpvrx.ui.browser.dialogs.DeleteConfirmationDialog
 import app.gyrolet.mpvrx.ui.browser.networkstreaming.NetworkStreamingScreen
+import app.gyrolet.mpvrx.ui.browser.medialibrary.MediaLibraryViewModel
 import app.gyrolet.mpvrx.ui.browser.playlist.PlaylistDetailScreen
 import app.gyrolet.mpvrx.ui.browser.playlist.PlaylistScreen
 import app.gyrolet.mpvrx.ui.browser.playlist.PlaylistViewModel
@@ -170,6 +171,8 @@ import app.gyrolet.mpvrx.ui.utils.navigateTo
 import app.gyrolet.mpvrx.ui.utils.rememberAppHaptics
 import app.gyrolet.mpvrx.utils.media.MediaUtils
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
@@ -199,13 +202,8 @@ object ProfileScreen : Screen {
     val enableRecentlyPlayed by advancedPreferences.enableRecentlyPlayed.collectAsState()
     val profileName by appearancePreferences.profileName.collectAsState()
     val profileImagePath by appearancePreferences.profileImagePath.collectAsState()
-    val hubOrder by appearancePreferences.profileHubOrder.collectAsState()
-    val hiddenHubs by appearancePreferences.profileHiddenHubs.collectAsState()
     val sectionOrder by appearancePreferences.profileSectionOrder.collectAsState()
     val hiddenSections by appearancePreferences.profileHiddenSections.collectAsState()
-    val visibleHubs = remember(hubOrder, hiddenHubs) {
-      visibleProfileItems(ProfileHubCard.entries, hubOrder, hiddenHubs)
-    }
     val visibleSections = remember(sectionOrder, hiddenSections) {
       visibleProfileItems(ProfileSection.entries, sectionOrder, hiddenSections)
     }
@@ -236,6 +234,32 @@ object ProfileScreen : Screen {
     val recentsViewModel: RecentlyPlayedViewModel = viewModel(factory = RecentlyPlayedViewModel.factory(application))
     val playlistViewModel: PlaylistViewModel = viewModel(factory = PlaylistViewModel.factory(application))
     val snapshotViewModel: SnapshotLibraryViewModel = viewModel(factory = SnapshotLibraryViewModel.factory(application))
+    val recentlyAddedViewModel =
+      if (ProfileSection.RECENTLY_ADDED in visibleSections) {
+        viewModel<MediaLibraryViewModel>(factory = MediaLibraryViewModel.factory(application))
+      } else {
+        null
+      }
+    val recentlyAdded =
+      if (recentlyAddedViewModel != null) {
+        val latestVideos = remember(recentlyAddedViewModel) {
+          recentlyAddedViewModel.videos
+            .map { videos ->
+              videos.asSequence()
+                .filterNot { it.isAudio }
+                .sortedWith(compareByDescending<Video> { it.dateAdded }.thenBy { it.path })
+                .take(SHELF_LIMIT)
+                .toList()
+            }
+            .flowOn(Dispatchers.Default)
+        }
+        latestVideos.collectAsStateWithLifecycle(initialValue = emptyList()).value
+      } else {
+        emptyList()
+      }
+    val isRecentlyAddedLoading =
+      recentlyAddedViewModel?.isLoading?.collectAsStateWithLifecycle()?.value == true
+    val showAddedThumbnails by browserPreferences.showVideoThumbnails.collectAsState()
 
     LifecycleResumeEffect(playlistViewModel) {
       playlistViewModel.startMonitoring()
@@ -250,7 +274,10 @@ object ProfileScreen : Screen {
     val recentShelf = remember(recentItems) { recentItems.take(SHELF_LIMIT) }
     val recentVideos =
       remember(recentShelf) { recentShelf.filterIsInstance<RecentlyPlayedItem.VideoItem>().map { it.video } }
-    val playbackInfo = rememberSwipePlaybackInfo(recentVideos)
+    val shelfVideos = remember(recentVideos, recentlyAdded) {
+      (recentVideos + recentlyAdded).distinctBy { it.path }
+    }
+    val playbackInfo = rememberSwipePlaybackInfo(shelfVideos)
     val snapshots = remember(snapshotLibrary.allCaptures) { snapshotLibrary.allCaptures.sortedByDescending { it.capturedAt } }
 
     var activeVideoItem by remember { mutableStateOf<RecentlyPlayedItem.VideoItem?>(null) }
@@ -356,6 +383,7 @@ object ProfileScreen : Screen {
         isRefreshing = isRefreshing,
         onRefresh = {
           recentsViewModel.refresh()
+          recentlyAddedViewModel?.refresh()
           playlistViewModel.refresh().join()
         },
         listState = listState,
@@ -376,7 +404,6 @@ object ProfileScreen : Screen {
               recentCount = recentItems.size,
               playlistCount = playlists.size,
               snapshotCount = snapshots.size,
-              hubCards = visibleHubs,
               collapseProgress = heroCollapseProgress,
               onEditProfile = {
                 haptics.tick()
@@ -462,6 +489,48 @@ object ProfileScreen : Screen {
                               )
                             }
                           }
+                        }
+                      }
+                  }
+                }
+              }
+
+              ProfileSection.RECENTLY_ADDED -> {
+                item(key = "recently_added_header") {
+                  SectionHeader(
+                    title = stringResource(R.string.profile_recently_added),
+                    count = recentlyAdded.size,
+                  )
+                }
+                item(key = "recently_added_shelf") {
+                  when {
+                    recentlyAdded.isEmpty() && isRecentlyAddedLoading -> {
+                      Box(
+                        modifier = Modifier.fillMaxWidth().padding(24.dp),
+                        contentAlignment = Alignment.Center,
+                      ) {
+                        CircularProgressIndicator()
+                      }
+                    }
+                    recentlyAdded.isEmpty() ->
+                      ShelfEmptyCard(
+                        icon = Icons.RoundedFilled.Movie,
+                        title = stringResource(R.string.ui_no_videos_found),
+                        message = stringResource(R.string.profile_recently_added_empty),
+                      )
+                    else ->
+                      LazyRow(
+                        contentPadding = PaddingValues(horizontal = horizontalShelfPadding),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                      ) {
+                        items(recentlyAdded, key = { it.path }) { video ->
+                          val info = playbackInfo[video.path]
+                          RecentVideoCard(
+                            video = video,
+                            progress = info?.progressPercentage?.takeUnless { info.isWatched },
+                            showThumbnail = showAddedThumbnails,
+                            onClick = { MediaUtils.playFile(video, context) },
+                          )
                         }
                       }
                   }
@@ -683,7 +752,6 @@ private fun ProfileOverviewCard(
   recentCount: Int,
   playlistCount: Int,
   snapshotCount: Int,
-  hubCards: List<ProfileHubCard>,
   collapseProgress: Float,
   onEditProfile: () -> Unit,
   onRecents: () -> Unit,
@@ -695,14 +763,7 @@ private fun ProfileOverviewCard(
   val isTablet = configuration.smallestScreenWidthDp >= 600
   val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
   val editLabel = stringResource(R.string.profile_edit)
-  val totalItems = hubCards.sumOf { hub ->
-    when (hub) {
-      ProfileHubCard.RECENTS -> recentCount
-      ProfileHubCard.PLAYLISTS -> playlistCount
-      ProfileHubCard.SNAPSHOTS -> snapshotCount
-      ProfileHubCard.NETWORK -> 0
-    }
-  }
+  val totalItems = recentCount + playlistCount + snapshotCount
   val avatarScale = 1f - 0.25f * collapseProgress
   val avatarAlpha = (1f - collapseProgress * 1.5f).coerceIn(0f, 1f)
 
@@ -788,27 +849,25 @@ private fun ProfileOverviewCard(
 
     // Intentional Material 3 Expressive connected bento group; no large tinted backdrop.
     // The logical corner radii adapt automatically to 1, 2 or 4 columns and RTL direction.
-    val shortcuts = hubCards.map { hub ->
-      when (hub) {
-        ProfileHubCard.RECENTS -> ProfileShortcutDestination(
-          Icons.RoundedFilled.History, stringResource(R.string.ui_recents), recentCount,
-          MaterialTheme.colorScheme.primary, onRecents,
-        )
-        ProfileHubCard.PLAYLISTS -> ProfileShortcutDestination(
-          Icons.RoundedFilled.Subscriptions, stringResource(R.string.ui_playlists), playlistCount,
-          MaterialTheme.colorScheme.secondary, onPlaylists,
-        )
-        ProfileHubCard.SNAPSHOTS -> ProfileShortcutDestination(
-          Icons.RoundedFilled.Image, stringResource(R.string.ui_snapshots), snapshotCount,
-          MaterialTheme.colorScheme.tertiary, onSnapshots,
-        )
-        ProfileHubCard.NETWORK -> ProfileShortcutDestination(
-          Icons.RoundedFilled.BringYourOwnIp, stringResource(R.string.ui_network), null,
-          MaterialTheme.colorScheme.primary, onNetwork,
-        )
-      }
-    }
-    if (shortcuts.isNotEmpty()) BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+    val shortcuts = listOf(
+      ProfileShortcutDestination(
+        Icons.RoundedFilled.History, stringResource(R.string.ui_recents), recentCount,
+        MaterialTheme.colorScheme.primary, onRecents,
+      ),
+      ProfileShortcutDestination(
+        Icons.RoundedFilled.Subscriptions, stringResource(R.string.ui_playlists), playlistCount,
+        MaterialTheme.colorScheme.secondary, onPlaylists,
+      ),
+      ProfileShortcutDestination(
+        Icons.RoundedFilled.Image, stringResource(R.string.ui_snapshots), snapshotCount,
+        MaterialTheme.colorScheme.tertiary, onSnapshots,
+      ),
+      ProfileShortcutDestination(
+        Icons.RoundedFilled.BringYourOwnIp, stringResource(R.string.ui_network), null,
+        MaterialTheme.colorScheme.primary, onNetwork,
+      ),
+    )
+    BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
       val columns = when {
         maxWidth < 300.dp -> 1
         maxWidth >= 680.dp -> 4
@@ -878,22 +937,22 @@ private fun ProfileShortcutTile(
     border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f)),
     modifier =
       modifier
-        .heightIn(min = 90.dp)
+        .heightIn(min = 64.dp)
         .tvFocusHighlight(shape),
   ) {
     Row(
-      modifier = Modifier.padding(horizontal = 12.dp, vertical = 16.dp),
+      modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
       verticalAlignment = Alignment.CenterVertically,
-      horizontalArrangement = Arrangement.spacedBy(9.dp),
+      horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
       Surface(
         shape = CircleShape,
         color = contentColor.copy(alpha = 0.14f),
         contentColor = contentColor,
-        modifier = Modifier.size(40.dp),
+        modifier = Modifier.size(32.dp),
       ) {
         Box(contentAlignment = Alignment.Center) {
-          Icon(icon, contentDescription = null, modifier = Modifier.size(20.dp))
+          Icon(icon, contentDescription = null, modifier = Modifier.size(18.dp))
         }
       }
       Column(
@@ -903,7 +962,7 @@ private fun ProfileShortcutTile(
         if (count != null) {
           Text(
             text = count.toString(),
-            style = MaterialTheme.typography.titleLargeEmphasized,
+            style = MaterialTheme.typography.titleMediumEmphasized,
             color = MaterialTheme.colorScheme.onSurface,
           )
         }
@@ -919,7 +978,7 @@ private fun ProfileShortcutTile(
         Icons.RoundedFilled.ChevronRight,
         contentDescription = null,
         tint = MaterialTheme.colorScheme.onSurfaceVariant,
-        modifier = Modifier.size(18.dp),
+        modifier = Modifier.size(16.dp),
       )
     }
   }
@@ -930,7 +989,7 @@ private fun ProfileShortcutTile(
 private fun SectionHeader(
   title: String,
   count: Int? = null,
-  onViewAll: () -> Unit,
+  onViewAll: (() -> Unit)? = null,
 ) {
   val configuration = LocalConfiguration.current
   val isTablet = configuration.smallestScreenWidthDp >= 600
@@ -965,18 +1024,20 @@ private fun SectionHeader(
         }
       }
     }
-    TextButton(
-      onClick = onViewAll,
-      contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-      shape = CircleShape,
-    ) {
-      Text(
-        stringResource(R.string.profile_view_all),
-        style = MaterialTheme.typography.labelMedium,
-        fontWeight = FontWeight.SemiBold,
-      )
-      Spacer(Modifier.width(2.dp))
-      Icon(Icons.RoundedFilled.ChevronRight, contentDescription = null, modifier = Modifier.size(16.dp))
+    if (onViewAll != null) {
+      TextButton(
+        onClick = onViewAll,
+        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+        shape = CircleShape,
+      ) {
+        Text(
+          stringResource(R.string.profile_view_all),
+          style = MaterialTheme.typography.labelMedium,
+          fontWeight = FontWeight.SemiBold,
+        )
+        Spacer(Modifier.width(2.dp))
+        Icon(Icons.RoundedFilled.ChevronRight, contentDescription = null, modifier = Modifier.size(16.dp))
+      }
     }
   }
 }
@@ -1083,7 +1144,7 @@ private fun RecentVideoCard(
   progress: Float?,
   showThumbnail: Boolean,
   onClick: () -> Unit,
-  onLongClick: () -> Unit,
+  onLongClick: (() -> Unit)? = null,
 ) {
   val thumbnailRepository = koinInject<ThumbnailRepository>()
   val density = LocalDensity.current
