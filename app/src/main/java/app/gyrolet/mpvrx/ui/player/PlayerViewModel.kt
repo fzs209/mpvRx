@@ -918,10 +918,34 @@ class PlayerViewModel(
       val selectedVideo = pairedYtdlTrack(track, TrackNode::isVideo)
         ?: allTracks.value.firstOrNull { candidate -> candidate.isVideo && candidate.isSelected }
       val selector = buildYtdlFormatSelector(videoTrack = selectedVideo, audioTrack = track)
-      if (selector != null && host?.reloadCurrentYtdlFormat(selector) == true) return
+      if (selector != null && host?.reloadCurrentYtdlFormat(selector) == true) {
+        rememberAudioTrack(track)
+        return
+      }
     }
 
     setTrackSelectionId("aid", track.id)
+    rememberAudioTrack(track)
+  }
+
+  /**
+   * Records a manual audio-track pick so TrackSelector can offer the same track on
+   * files without a saved selection. Only the track's language and title are kept:
+   * raw mpv track ids are per-file and mean nothing in another file. Runs solely on
+   * a user tap (two asynchronous preference writes); automatic selections made by
+   * TrackSelector or mpv never reach this, so they cannot overwrite the memory.
+   * Turning audio off is a toggle above and deliberately leaves the memory intact.
+   */
+  private fun rememberAudioTrack(track: TrackNode) {
+    val lang = track.effectiveLang?.trim().orEmpty()
+    val title = track.effectiveTitle?.trim().orEmpty()
+    if (lang.isEmpty() && title.isEmpty()) return
+    if (audioPreferences.rememberedAudioTrackLang.get() != lang) {
+      audioPreferences.rememberedAudioTrackLang.set(lang)
+    }
+    if (audioPreferences.rememberedAudioTrackTitle.get() != title) {
+      audioPreferences.rememberedAudioTrackTitle.set(title)
+    }
   }
 
   private fun currentItemRequiresYtdlp(): Boolean {

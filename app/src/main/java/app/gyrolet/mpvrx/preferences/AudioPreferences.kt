@@ -21,6 +21,16 @@ class AudioPreferences(
   preferenceStore: PreferenceStore,
 ) {
   val preferredLanguages = preferenceStore.getString("audio_preferred_languages")
+
+  /**
+   * Identity (language + title, as reported by mpv) of the audio track the user last
+   * picked by hand. Applied to files that have no saved per-file track selection yet,
+   * so a manual choice carries over to the next episode instead of being re-made for
+   * every file. Two plain strings: one read on file load, written only on a manual
+   * track pick, never on the playback hot path.
+   */
+  val rememberedAudioTrackLang = preferenceStore.getString("audio_remembered_track_lang")
+  val rememberedAudioTrackTitle = preferenceStore.getString("audio_remembered_track_title")
   val defaultAudioDelay = preferenceStore.getInt("audio_delay_default")
   val pickerPath = preferenceStore.getString("audio_picker_path")
   val audioPitchCorrection = preferenceStore.getBoolean("audio_pitch_correction", true)

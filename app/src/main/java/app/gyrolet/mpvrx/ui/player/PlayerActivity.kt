@@ -5272,6 +5272,7 @@ class PlayerActivity :
         expectedGeneration = loadGeneration,
         savedSubtitlesOff = restored.subtitlesOff,
         savedAudioOff = restored.audioOff,
+        savedAudioSelection = restored.audioSelectionSaved,
       )
     }
 
@@ -5681,6 +5682,7 @@ class PlayerActivity :
     val hasSavedTracks: Boolean = false,
     val subtitlesOff: Boolean = false,
     val audioOff: Boolean = false,
+    val audioSelectionSaved: Boolean = false,
   )
 
   private suspend fun loadVideoPlaybackState(
@@ -5734,6 +5736,7 @@ class PlayerActivity :
         hasSavedTracks = state != null,
         subtitlesOff = state != null && state.sid <= 0,
         audioOff = state != null && state.aid == 0,
+        audioSelectionSaved = state != null && state.aid >= 0,
       )
     }.onFailure { e ->
       Log.e(TAG, "Error loading playback state", e)
