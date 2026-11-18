@@ -15,13 +15,14 @@ name: Build FongMi Patched (mpv DV sink fix)
 # base-layer decoder even under mediacodec_embed.
 #
 # The native build mirrors Riteshp2001/mpvlibAndroid's own build.yml (branch
-# mpv-fongmi), restricted to arm64, with FongMi/mpv pinned to the revision the
-# patch was written for. It also drops the gpu-next sharpen-hook section
-# of mpvlibAndroid's mpv_video_shaders.patch: that hunk is written for a
-# different gpu-next implementation and fails against this mpv revision
-# ("patch does not apply"). The section targeted video/out/vo_gpu_next.c
-# until mpvlibAndroid ported it to video/out/gpu_next/video.c on
-# 2026-11-18; both forms are dropped.
+# mpv-fongmi), restricted to arm64. FongMi/mpv is NOT pinned to a commit: the
+# build uses the fongmi branch head exactly as ci.sh install cloned it, the
+# same source the upstream mpvlibAndroid build uses. The Dolby Vision sink
+# patch in native-patches/ is maintained against that moving branch head;
+# if the branch moves so the patch no longer applies, the patch is refreshed
+# rather than the mpv revision being pinned back. mpvlibAndroid's own
+# patches (including mpv_video_shaders.patch) are applied in full, exactly
+# as upstream applies them.
 #
 # The APK step resolves mpvlib from a local ivy directory staged by this
 # workflow via -PmpvlibReleasesUrl (see settings.gradle.kts); every other
@@ -250,66 +251,21 @@ jobs:
           path: mpvlib/gh-libplacebo-cache/
           key: libplacebo-${{ runner.os }}-${{ env.LIBPLACEBO_CACHE_IDENTIFIER }}
 
-      - name: Pin mpv and apply Dolby Vision sink patch
+      - name: Apply Dolby Vision sink patch
         shell: bash
         run: |
           set -euxo pipefail
           mpv_dir="mpvlib/buildscripts/deps/mpv"
-          mpv_commit="1a29fe7407149a572d924de48942d6ce1cc61314"
 
-          # ci.sh install cloned the fongmi branch; pin it to the exact
-          # revision the sink patch was written and verified for.
-          git -C "$mpv_dir" fetch --depth=1 origin "$mpv_commit"
-          git -C "$mpv_dir" checkout --detach FETCH_HEAD
-          test "$(git -C "$mpv_dir" rev-parse HEAD)" = "$mpv_commit"
-
+          # ci.sh install cloned the fongmi branch; use that branch head
+          # as-is (no commit pin). The sink patch is maintained against
+          # the moving branch head.
+          echo "mpv revision: $(git -C "$mpv_dir" rev-parse HEAD)"
           git -C "$mpv_dir" apply --check \
             "$GITHUB_WORKSPACE/native-patches/fongmi-mpv-dolby-vision-output-mode.patch"
           git -C "$mpv_dir" apply \
             "$GITHUB_WORKSPACE/native-patches/fongmi-mpv-dolby-vision-output-mode.patch"
           git -C "$mpv_dir" diff --stat
-
-          # mpvlibAndroid's shader patch carries a gpu-next sharpen-hook
-          # hunk written for a different gpu-next implementation; against
-          # this mpv revision it fails with "patch does not apply". Drop
-          # only that section (targeting video/out/vo_gpu_next.c, or
-          # video/out/gpu_next/video.c since the 2026-11-18 port), keep
-          # the csputils.c and video_shaders.c hunks.
-          python3 - "mpvlib/buildscripts/patches/mpv_video_shaders.patch" <<'PY'
-          from pathlib import Path
-          import re
-          import sys
-
-          patch = Path(sys.argv[1])
-          source = patch.read_text(encoding="utf-8")
-          sections = re.split(r"(?m)(?=^diff --git )", source)
-          kept = []
-          removed = 0
-
-          incompatible = (
-              "diff --git a/video/out/vo_gpu_next.c b/video/out/vo_gpu_next.c",
-              "diff --git a/video/out/gpu_next/video.c b/video/out/gpu_next/video.c",
-          )
-
-          for section in sections:
-              if section.startswith(incompatible):
-                  removed += 1
-                  continue
-              kept.append(section)
-
-          if removed != 1:
-              raise SystemExit(
-                  "Expected exactly one incompatible gpu-next shader patch section; "
-                  f"found {removed}. Refusing to alter the native patch."
-              )
-
-          filtered = "".join(kept)
-          if any(header in filtered for header in incompatible):
-              raise SystemExit("gpu-next shader patch section was not fully removed")
-
-          patch.write_text(filtered, encoding="utf-8")
-          print("Excluded the incompatible gpu-next shader section; retained csputils.c and video_shaders.c.")
-          PY
 
       - name: Build AAR for arm64
         working-directory: mpvlib/buildscripts
