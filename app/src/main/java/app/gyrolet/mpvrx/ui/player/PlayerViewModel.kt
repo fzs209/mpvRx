@@ -907,6 +907,10 @@ class PlayerViewModel(
   }
 
   fun selectAudioTrack(track: TrackNode) {
+    // Every path out of here is a deliberate pick in the track list, including the
+    // yt-dlp reload below, which returns before any property is set: record the pick as
+    // a manual selection for the file it was made in.
+    ManualAudioSelectionTracker.markCurrent()
     if (getTrackSelectionId("aid") == track.id) {
       setTrackSelectionId("aid", null)
       return

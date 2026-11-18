@@ -1473,6 +1473,7 @@ internal fun userScriptsNeedReload(currentKey: String): Boolean {
     restoreSavedPosition: Boolean = false,
     positionRestoreOverride: PlaybackPositionRestoreOverride? = null,
     initialPositionSeconds: Double? = null,
+    initialAudioSelection: Int? = null,
     flattenEditions: Boolean = false,
     commit: ((() -> Long) -> Long)? = null,
   ): Long {
@@ -1499,6 +1500,7 @@ internal fun userScriptsNeedReload(currentKey: String): Boolean {
               restoreSavedPosition = restoreSavedPosition,
               positionRestoreOverride = positionRestoreOverride,
               initialPositionSeconds = initialPositionSeconds,
+              initialAudioSelection = initialAudioSelection,
               flattenEditions = flattenEditions,
             )
           if (generation >= 0L) {
@@ -1534,6 +1536,7 @@ internal fun userScriptsNeedReload(currentKey: String): Boolean {
     restoreSavedPosition: Boolean = false,
     positionRestoreOverride: PlaybackPositionRestoreOverride? = null,
     initialPositionSeconds: Double? = null,
+    initialAudioSelection: Int? = null,
     flattenEditions: Boolean = false,
   ): Long {
     val smbPath = item?.networkSource?.let { source ->
@@ -1661,6 +1664,16 @@ internal fun userScriptsNeedReload(currentKey: String): Boolean {
           add("pause=yes")
           add(if (selectVideoForNewFile && (!deferVideoSelectionUntilSurface || ytdlVideoRequiresSelection)) "vid=auto" else "vid=no")
           initialPosition?.let { add("start=$it") }
+          // A manual audio selection saved for this file is decided before mpv picks a
+          // track, so it is scoped into the load itself instead of being repaired after
+          // the fact: >0 selects that track, 0 selects no audio. Without a manual
+          // selection the option stays out and mpv's language preference decides.
+          // mpv.conf-owned language selection keeps full control, as everywhere else.
+          if (initialAudioSelection != null && initialAudioSelection >= 0 &&
+            !MpvConfigOverridePolicy.ownsAny(MpvConfigControlledFeatures.AUDIO_TRACK_SELECTION)
+          ) {
+            add(if (initialAudioSelection > 0) "aid=$initialAudioSelection" else "aid=no")
+          }
           // Keep ordinary files on mpv's fast path. Only files with no indexed duration need
           // bounded stream probing; loadfile scopes these options to the current file.
           if (shouldProbeMissingDuration(resolvedItem, playableUri)) {

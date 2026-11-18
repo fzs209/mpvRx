@@ -968,6 +968,21 @@ val MIGRATION_30_31 =
     }
   }
 
+/**
+ * PlaybackStateEntity gains a flag saying whether the saved audio track was picked by hand.
+ * Rows written before this column existed stored whatever track was playing at exit, with no
+ * way to tell a manual pick from an automatic one. Treat an existing saved track as a manual
+ * selection so an upgrade does not silently discard it; a saved audio-off from before cannot
+ * be recognised, because it was stored as -1, the same value as no saved selection.
+ */
+val MIGRATION_31_32 =
+  object : Migration(31, 32) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+      db.execSQL("ALTER TABLE `PlaybackStateEntity` ADD COLUMN `hasManualAudioSelection` INTEGER NOT NULL DEFAULT 0")
+      db.execSQL("UPDATE `PlaybackStateEntity` SET `hasManualAudioSelection` = 1 WHERE `aid` > 0")
+    }
+  }
+
 val MIGRATION_24_25 =
   object : Migration(24, 25) {
     override fun migrate(db: SupportSQLiteDatabase) {
@@ -1037,6 +1052,7 @@ val DatabaseModule =
           MIGRATION_28_29,
           MIGRATION_29_30,
           MIGRATION_30_31,
+          MIGRATION_31_32,
         ).build()
     }
 

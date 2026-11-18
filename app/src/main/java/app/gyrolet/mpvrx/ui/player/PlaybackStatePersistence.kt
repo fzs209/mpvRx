@@ -26,7 +26,9 @@ internal data class PlaybackStateSnapshot(
   val secondarySid: Int,
   val subDelayMs: Int,
   val subSpeed: Double,
-  val aid: Int,
+  val aid: Int, // >0 = mpv track ID, 0 = user disabled audio, -1 = no saved selection
+  // True when the user picked the audio track by hand during this playback session.
+  val hasManualAudioSelection: Boolean = false,
   val audioDelayMs: Int,
   val externalSubtitles: String,
   val isPositionRestorePending: Boolean = false,
@@ -66,6 +68,13 @@ internal object PlaybackStatePersistence {
       subDelay = snapshot.subDelayMs,
       subSpeed = snapshot.subSpeed,
       aid = snapshot.aid,
+      // A manual pick made this session marks the record. A manual pick from an earlier
+      // session stays marked while the track itself is unchanged; if the track changed
+      // without a manual pick this session, an automatic step made that change and the
+      // record goes back to being decided by the automatic rules on the next open.
+      hasManualAudioSelection =
+        snapshot.hasManualAudioSelection ||
+          (oldState?.hasManualAudioSelection == true && snapshot.aid == oldState.aid),
       audioDelay = snapshot.audioDelayMs,
       timeRemaining = timeRemaining,
       externalSubtitles = snapshot.externalSubtitles,

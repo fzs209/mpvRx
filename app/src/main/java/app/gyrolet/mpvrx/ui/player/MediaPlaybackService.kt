@@ -2103,7 +2103,10 @@ class MediaPlaybackService :
             ) * PLAYBACK_STATE_MILLISECONDS_TO_SECONDS
           ).toInt(),
         subSpeed = readMpvDouble("sub-speed", oldState?.subSpeed ?: DEFAULT_PLAYBACK_STATE_SUB_SPEED),
-        aid = readMpvTrackId("aid", oldState?.aid ?: -1),
+        // A disabled audio track ("no") is a deliberate choice: record it as 0 so a
+        // later restore can tell it apart from -1, which means no selection was saved.
+        aid = readMpvTrackId("aid", oldState?.aid ?: -1, noValue = 0),
+        hasManualAudioSelection = ManualAudioSelectionTracker.isMarkedFor(identifier),
         audioDelayMs =
           (
             readMpvDouble(
@@ -2127,11 +2130,12 @@ class MediaPlaybackService :
   private fun readMpvTrackId(
     property: String,
     fallback: Int,
+    noValue: Int = -1,
   ): Int =
     runCatching {
       when (val value = PlaybackSession.getPropertyString(property)) {
         null -> fallback
-        "no" -> -1
+        "no" -> noValue
         else -> value.toIntOrNull() ?: fallback
       }
     }.getOrDefault(fallback)

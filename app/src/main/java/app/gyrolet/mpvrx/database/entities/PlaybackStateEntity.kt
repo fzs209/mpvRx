@@ -22,10 +22,15 @@ data class PlaybackStateEntity(
   val secondarySid: Int = -1, // Secondary subtitle track ID (-1 means disabled)
   val subDelay: Int,
   val subSpeed: Double,
-  val aid: Int,
+  val aid: Int, // Audio track ID: >0 = mpv track ID, 0 = user disabled audio, -1 = no saved selection
   val audioDelay: Int,
   val timeRemaining: Int = 0, // in seconds (duration - lastPosition)
   val externalSubtitles: String = "", // Comma-separated list of external subtitle URIs
   val hasBeenWatched: Boolean = false, // Persistent flag: true if video has ever reached the watched threshold
   val newLabelOverride: Boolean? = null,
+  // True when [aid] holds a selection the user made by hand in this file's track list, as
+  // opposed to a track an automatic step (mpv's language choice, TrackSelector) picked.
+  // Only a manual selection is restored ahead of the preferred-language rules on the next
+  // open; an automatic result is re-decided on every open.
+  val hasManualAudioSelection: Boolean = false,
 )

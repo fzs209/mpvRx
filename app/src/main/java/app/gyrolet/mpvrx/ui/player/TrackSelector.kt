@@ -21,7 +21,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 
 /**
- * Selects tracks using ordered language or title preferences, with saved selections as fallback.
+ * Corrects the automatic track choices mpv made on load, using ordered language or title
+ * preferences. A saved manual audio selection is applied before this runs and is never
+ * overridden here: the audio correction only ever re-decides tracks no user choice covers.
  * A saved subtitles-off choice remains off. mpv.conf-owned language selection is left to mpv.
  *
  * Based on https://github.com/Chinna95P/mpv-anime-build/blob/main/scripts/track-selector.lua.
@@ -46,6 +48,7 @@ class TrackSelector(
     hasState: Boolean = false,
     expectedGeneration: Long = PlaybackSession.state.value.generation,
     savedSubtitlesOff: Boolean = false,
+    savedManualAudioSelection: Boolean = false,
   ) = withContext(Dispatchers.IO) {
     var trackCount = 0
     for (attempt in 0 until 20) {
@@ -59,7 +62,12 @@ class TrackSelector(
     if (tracks.none { it.type == "video" && !it.image }) return@withContext
 
     if (!MpvConfigOverridePolicy.ownsAny(MpvConfigControlledFeatures.AUDIO_TRACK_SELECTION)) {
-      ensureAudioTrackSelected(tracks, hasState, expectedGeneration)
+      // A manual selection saved for this file was already applied as the load's initial
+      // audio track. Correcting it here would silently undo the user's own choice, so the
+      // audio correction runs only for files no manual choice covers.
+      if (!savedManualAudioSelection) {
+        ensureAudioTrackSelected(tracks, expectedGeneration)
+      }
     }
     if (!MpvConfigOverridePolicy.ownsAny(MpvConfigControlledFeatures.SUBTITLE_TRACK_SELECTION)) {
       ensureSubtitleTrackSelected(tracks, hasState, expectedGeneration, savedSubtitlesOff)
@@ -91,23 +99,49 @@ class TrackSelector(
       }
     }
 
-  private fun ensureAudioTrackSelected(tracks: List<Track>, hasState: Boolean, generation: Long) {
+  private fun ensureAudioTrackSelected(tracks: List<Track>, generation: Long) {
     val current = getTrackSelectionId("aid")
     val audioTracks = tracks.filter { it.type == "audio" }
-    val preferences = preferences(audioPreferences.preferredLanguages.get())
-    if (hasState && preferences.isEmpty() && audioTracks.any { it.id == current }) return
-
+    if (audioTracks.isEmpty()) return
+    val currentTrack = audioTracks.firstOrNull { it.id == current }
+    // Clean tracks exclude commentary, description and similar extra tracks. The same
+    // clean list decides both keeping and re-selecting, so a track this step would never
+    // pick cannot survive just because an earlier automatic step picked it.
     val cleanTracks = audioTracks.filter { track -> ignoredAudioTitles.none { track.title.contains(it) } }
-    for (preference in preferences) {
-      val match = cleanTracks.mapNotNull { track -> matchRank(track, preference)?.let { track to it } }
-        .minByOrNull { it.second }?.first
-      if (match != null) {
-        selectTrack("aid", match.id, generation, "Preferred audio: $preference")
-        return
-      }
+    val preferences = preferences(audioPreferences.preferredLanguages.get())
+
+    // mpv already applied the preferred languages once, through its own language option.
+    // Keep its result when it is a clean track and either no preference is configured or
+    // its language already satisfies one of the preferences.
+    if (currentTrack != null && currentTrack in cleanTracks &&
+      (preferences.isEmpty() || preferences.any { preference -> matchRank(currentTrack, preference) != null })
+    ) {
+      return
     }
-    if (audioTracks.any { it.id == current }) return
-    cleanTracks.firstOrNull()?.let { selectTrack("aid", it.id, generation, "Clean audio fallback") }
+
+    // Otherwise look for a better clean track, one preference at a time, in order. Among
+    // equally ranked matches for one preference, the file's own default track wins over
+    // plain list order.
+    for (preference in preferences) {
+      val candidates = cleanTracks.mapNotNull { track -> matchRank(track, preference)?.let { track to it } }
+      if (candidates.isEmpty()) continue
+      val bestRank = candidates.minOf { it.second }
+      val best = candidates.filter { it.second == bestRank }.map { it.first }
+      val match = best.firstOrNull { it.isDefault } ?: best.first()
+      selectTrack("aid", match.id, generation, "Preferred audio: $preference")
+      return
+    }
+
+    // No preference produced a match. A clean current track is still the best result
+    // available, so keep it.
+    if (currentTrack != null && currentTrack in cleanTracks) return
+
+    // The current track is an excluded extra track or there is no current track at all,
+    // and no user choice is involved (manual selections never reach this function):
+    // fall back to a clean track, preferring the file's default.
+    if (cleanTracks.isEmpty()) return
+    val fallback = cleanTracks.firstOrNull { it.isDefault } ?: cleanTracks.first()
+    selectTrack("aid", fallback.id, generation, "Clean audio fallback")
   }
 
   private fun ensureSubtitleTrackSelected(

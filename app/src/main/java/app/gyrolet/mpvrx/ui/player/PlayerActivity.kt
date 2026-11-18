@@ -5271,6 +5271,7 @@ class PlayerActivity :
         hasState = restored.hasSavedTracks,
         expectedGeneration = loadGeneration,
         savedSubtitlesOff = restored.subtitlesOff,
+        savedManualAudioSelection = restored.hasManualAudioSelection,
       )
     }
 
@@ -5618,7 +5619,11 @@ class PlayerActivity :
         secondarySid = player.secondarySid,
         subDelayMs = ((PlaybackSession.getPropertyDouble("sub-delay") ?: 0.0) * MILLISECONDS_TO_SECONDS).toInt(),
         subSpeed = PlaybackSession.getPropertyDouble("sub-speed") ?: DEFAULT_SUB_SPEED,
-        aid = player.aid,
+        // player.aid reads "no" as -1, which is also the no-saved-selection value, so a
+        // deliberate audio-off would be lost here. Read the property text instead: "no"
+        // is saved as 0, a deliberate choice the restore can tell apart from -1.
+        aid = if (PlaybackSession.getPropertyString("aid") == "no") 0 else player.aid,
+        hasManualAudioSelection = ManualAudioSelectionTracker.isMarkedFor(saveIdentifier),
         audioDelayMs = ((PlaybackSession.getPropertyDouble("audio-delay") ?: 0.0) * MILLISECONDS_TO_SECONDS).toInt(),
         externalSubtitles = viewModel.externalSubtitles.joinToString("|"),
       )
@@ -5667,6 +5672,7 @@ class PlayerActivity :
     val hasState: Boolean = false,
     val hasSavedTracks: Boolean = false,
     val subtitlesOff: Boolean = false,
+    val hasManualAudioSelection: Boolean = false,
   )
 
   private suspend fun loadVideoPlaybackState(
@@ -5706,7 +5712,7 @@ class PlayerActivity :
           }
         }
       }
-      applyPlaybackState(state, restoreAudioTrack = positionRestoreOverride == null, loadGeneration = loadGeneration)
+      applyPlaybackState(state, loadGeneration = loadGeneration)
 
       if (!PlaybackSession.isCurrentGeneration(loadGeneration)) return@runCatching LoadedPlaybackState()
 
@@ -5719,6 +5725,7 @@ class PlayerActivity :
         hasState = state != null || positionRestoreOverride != null,
         hasSavedTracks = state != null,
         subtitlesOff = state != null && state.sid <= 0,
+        hasManualAudioSelection = state != null && state.hasManualAudioSelection && state.aid >= 0,
       )
     }.onFailure { e ->
       Log.e(TAG, "Error loading playback state", e)
@@ -5734,7 +5741,6 @@ class PlayerActivity :
    */
   private suspend fun applyPlaybackState(
     state: PlaybackStateEntity?,
-    restoreAudioTrack: Boolean,
     loadGeneration: Long,
   ) {
     if (state == null) return
@@ -5770,11 +5776,21 @@ class PlayerActivity :
       forceAssOverride = subtitlesPreferences.overrideAssSubs.get(),
     )
 
-    if (restoreAudioTrack && state.aid > 0 && player.aid != state.aid &&
+    // Only a manual selection is restored, and it is restored on every load: whether the
+    // load carries a position-restore override has no bearing on which audio track the
+    // user picked. The load itself already started on this track (see the pre-load
+    // lookup in the load path), so this normally finds nothing to change; it stays as
+    // the guarantee for loads that could not take the initial-track option. A saved
+    // audio-off (aid 0) restores to "no" the same way. getTrackSelectionId reads the
+    // current selection in the same terms: a track ID, or 0 for "no".
+    if (state.hasManualAudioSelection && state.aid >= 0 &&
       !MpvConfigOverridePolicy.ownsAny(MpvConfigControlledFeatures.AUDIO_TRACK_SELECTION)
     ) {
-      PlaybackSession.commandForGeneration(loadGeneration, "set", "aid", state.aid.toString())
-      Log.d(TAG, "Restored audio track: ${state.aid} (user selection)")
+      if (getTrackSelectionId("aid") != state.aid) {
+        val restoredAid = state.aid.takeIf { it > 0 }?.toString() ?: "no"
+        PlaybackSession.commandForGeneration(loadGeneration, "set", "aid", restoredAid)
+        Log.d(TAG, "Restored audio track: ${state.aid} (user selection)")
+      }
     }
 
     PlaybackSession.setPropertyDouble("sub-delay", subDelay)
@@ -6572,6 +6588,16 @@ private suspend fun restorePlaybackPosition(state: PlaybackStateEntity?, loadGen
       positionRestoreOverride ?: scriptRestore ?: snapshotJump ?: AudiobookPlayback.positionForLoad(item, intent)
     val restoreSavedPosition = playerPreferences.savePositionOnQuit.get()
     val resumeMode = playerPreferences.resumePlaybackMode.get()
+    // One saved-state lookup ahead of the load: the start position below and the saved
+    // manual audio selection both come from this record. Reading it before loadfile is
+    // what lets a manual audio selection decide the load's initial track directly,
+    // instead of being repaired after mpv has already picked one by language preference.
+    val savedStateForLoad =
+      if (item.audiobook == null && !item.isDefinitelyAudioOnly()) {
+        resolvePlaybackState(item.stableId, legacyMediaIdentifier)
+      } else {
+        null
+      }
     // Only Always Resume may use the fast load-local start option. Never starts at zero.
     val initialPositionSeconds =
       if (effectivePositionOverride != null) {
@@ -6581,13 +6607,21 @@ private suspend fun restorePlaybackPosition(state: PlaybackStateEntity?, loadGen
         resumeMode == ResumePlaybackMode.Always &&
         !item.isDefinitelyAudioOnly()
       ) {
-        resolvePlaybackState(item.stableId, legacyMediaIdentifier)
+        savedStateForLoad
           ?.lastPosition
           ?.takeIf { it > 3 }
           ?.toDouble()
       } else {
         null
       }
+    // The saved manual audio selection for this file: >0 is the saved track, 0 is audio
+    // off. Null when no manual selection is saved, in which case mpv picks the track by
+    // preferred language as usual.
+    val initialAudioSelection =
+      savedStateForLoad
+        ?.takeIf { it.hasManualAudioSelection }
+        ?.aid
+        ?.takeIf { it >= 0 }
     ensureCurrentMediaRequest(requestGeneration)
     val ytdlpSource =
       sequenceOf(item.originalUri, item.playableUri)
@@ -6627,6 +6661,7 @@ private suspend fun restorePlaybackPosition(state: PlaybackStateEntity?, loadGen
           restoreSavedPosition = restoreSavedPosition,
           positionRestoreOverride = effectivePositionOverride,
           initialPositionSeconds = initialPositionSeconds,
+          initialAudioSelection = initialAudioSelection,
           flattenEditions = requiresYtdlp && !MpvConfigOverridePolicy.isOwnedByMpvConf("flatten-editions"),
           commit = { nativeLoad ->
             PlaybackActivityOwner.runIfOwner(playbackOwnerToken, -1L) {
