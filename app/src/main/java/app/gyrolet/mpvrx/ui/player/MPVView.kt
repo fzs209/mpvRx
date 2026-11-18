@@ -129,91 +129,22 @@ class MPVView(
 
   /** A slow Surface must not prevent the media load and its watchdog from starting. */
   internal suspend fun awaitSurfaceReady(): Boolean {
-    val startedAt = SystemClock.elapsedRealtime()
-    val deadline = startedAt + SURFACE_READY_TIMEOUT_MS
-    var lastReason: String? = null
-    var lastReasonLogAt = 0L
-    var idleBoundSince = 0L
+    val deadline = SystemClock.elapsedRealtime() + SURFACE_READY_TIMEOUT_MS
     while (SystemClock.elapsedRealtime() < deadline) {
-      var reason: String? = null
-      var idleBound = false
       val attached =
         withContext(Dispatchers.Main.immediate) {
           when {
             ensureSurfaceAttached() -> true
             // A hidden window (backgrounded/locked) will not create a Surface until it returns.
             isExiting || !surfaceBindingEnabled || !renderCallbacksEnabled ||
-              (isAttachedToWindow && windowVisibility != VISIBLE) -> {
-              reason =
-                "not waiting: exiting=$isExiting binding=$surfaceBindingEnabled " +
-                  "callbacks=$renderCallbacksEnabled attachedToWindow=$isAttachedToWindow " +
-                  "windowVisibility=$windowVisibility"
-              false
-            }
-            else -> {
-              reason = surfaceWaitReason()
-              idleBound = PlaybackSession.isIdleWithBoundSurface(this@MPVView)
-              null
-            }
+              (isAttachedToWindow && windowVisibility != VISIBLE) -> false
+            else -> null
           }
         }
-      if (attached != null) {
-        if (reason != null || lastReason != null) {
-          Log.d(
-            TAG,
-            "SurfaceDiag: surface wait ended after ${SystemClock.elapsedRealtime() - startedAt} ms " +
-              "(ready=$attached, reason=${reason ?: lastReason})",
-          )
-        }
-        return attached
-      }
-      // Idle fast-path (safety net): readiness normally follows as soon as bindSurface
-      // has applied wid, without waiting for a load or a video output. If a bind cannot
-      // complete (wid never becomes observable) while the core sits idle with nothing
-      // loaded, stop waiting once that state has held for the grace period and let the
-      // caller take its deferred-selection load instead of burning the full timeout.
-      val now = SystemClock.elapsedRealtime()
-      if (idleBound) {
-        if (idleBoundSince == 0L) idleBoundSince = now
-        if (now - idleBoundSince >= SURFACE_IDLE_FAST_PATH_MS) {
-          Log.d(
-            TAG,
-            "SurfaceDiag: surface bound but core idle without a video output for " +
-              "${now - idleBoundSince} ms; proceeding with deferred video selection",
-          )
-          return false
-        }
-      } else {
-        idleBoundSince = 0L
-      }
-      // SurfaceDiag: name the blocking precondition, at most once per second per reason,
-      // so a reproduction log shows which stage of the handoff stalled.
-      if (reason != null && (reason != lastReason || now - lastReasonLogAt >= 1_000L)) {
-        Log.d(TAG, "SurfaceDiag: waiting for surface (${now - startedAt} ms): $reason")
-        lastReason = reason
-        lastReasonLogAt = now
-      }
+      if (attached != null) return attached
       withTimeoutOrNull(SURFACE_RETRY_MS) { surfaceReadiness.first { it } }
     }
-    Log.w(
-      TAG,
-      "SurfaceDiag: surface wait timed out after ${SystemClock.elapsedRealtime() - startedAt} ms; " +
-        "last reason: ${lastReason ?: "unknown"}",
-    )
     return false
-  }
-
-  /** Diagnostic for [awaitSurfaceReady]: which precondition is keeping the surface unready. */
-  private fun surfaceWaitReason(): String {
-    val surface = renderSurface ?: return "no render surface yet (surfaceCreated not delivered)"
-    if (!surface.isValid) return "render surface exists but is invalid"
-    if (!isAttachedToWindow) return "view not attached to window"
-    if (windowVisibility != VISIBLE) return "window not visible (visibility=$windowVisibility)"
-    if (!PlaybackSession.isSurfaceAttachedTo(this)) {
-      return "surface valid but not yet bound to the playback session"
-    }
-    if (!PlaybackSession.isRendererReadyFor(this)) return "surface bound but renderer not ready"
-    return "surface present and bound; readiness flag not yet set"
   }
 
   /**
@@ -752,11 +683,6 @@ class MPVView(
     const val OSD_REFERENCE_HEIGHT = 720.0
     const val SURFACE_RETRY_MS = 250L
     const val SURFACE_READY_TIMEOUT_MS = 5_000L
-    // Grace for the idle fast-path in awaitSurfaceReady: a still-living previous video
-    // output activates within ~10 ms of the bind, so 200 ms of continuous futility only
-    // fires once it is gone. Polls are SURFACE_RETRY_MS apart, so the bail lands ~250 ms
-    // after the futile state is first observed.
-    const val SURFACE_IDLE_FAST_PATH_MS = 200L
   }
 
   @Suppress("ReturnCount", "DEPRECATION")
@@ -819,11 +745,6 @@ class MPVView(
   }
 
   override fun onRenderSurfaceAvailable(surface: Surface, width: Int, height: Int) {
-    Log.d(
-      TAG,
-      "SurfaceDiag: render surface available ${width}x$height valid=${surface.isValid} " +
-        "attachedToWindow=$isAttachedToWindow windowVisibility=$windowVisibility",
-    )
     attachRenderSurface(surface, width, height, retriesRemaining = 2)
   }
 
@@ -887,7 +808,6 @@ class MPVView(
   }
 
   override fun onRenderSurfaceDestroyed() {
-    Log.d(TAG, "SurfaceDiag: render surface destroyed")
     cancelSurfaceRecovery()
     cancelPausedFrameRedraw()
     surfaceAttachmentGeneration++
