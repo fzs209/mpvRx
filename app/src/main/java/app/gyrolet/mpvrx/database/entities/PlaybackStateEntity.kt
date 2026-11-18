@@ -33,4 +33,8 @@ data class PlaybackStateEntity(
   // Only a manual selection is restored ahead of the preferred-language rules on the next
   // open; an automatic result is re-decided on every open.
   val hasManualAudioSelection: Boolean = false,
+  // Separator-joined URIs of external audio tracks the user added by hand, re-added on
+  // the next open before the saved selection is restored, like externalSubtitles. A saved
+  // [aid] can point at one of these tracks, and it only exists again once it is re-added.
+  val externalAudio: String = "",
 )

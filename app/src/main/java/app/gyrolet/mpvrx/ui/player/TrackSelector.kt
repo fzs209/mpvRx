@@ -48,7 +48,7 @@ class TrackSelector(
     hasState: Boolean = false,
     expectedGeneration: Long = PlaybackSession.state.value.generation,
     savedSubtitlesOff: Boolean = false,
-    savedManualAudioSelection: Boolean = false,
+    savedManualAudioId: Int = -1,
   ) = withContext(Dispatchers.IO) {
     var trackCount = 0
     for (attempt in 0 until 20) {
@@ -62,10 +62,29 @@ class TrackSelector(
     if (tracks.none { it.type == "video" && !it.image }) return@withContext
 
     if (!MpvConfigOverridePolicy.ownsAny(MpvConfigControlledFeatures.AUDIO_TRACK_SELECTION)) {
-      // A manual selection saved for this file was already applied as the load's initial
-      // audio track. Correcting it here would silently undo the user's own choice, so the
-      // audio correction runs only for files no manual choice covers.
-      if (!savedManualAudioSelection) {
+      // The audio correction is skipped only while a manual choice verifiably governs
+      // this file:
+      // - the user picked a track by hand earlier in this session (this step can run
+      //   seconds after the load on slow sources, and must not undo that pick), or
+      // - a saved manual selection was applied for this load and is still valid: a
+      //   saved audio-off (0) always is; a saved track ID only counts when this file's
+      //   track list still contains an audio track with that ID. A saved ID that no
+      //   longer exists (the file was replaced, an external track could not be
+      //   re-added) is treated as no manual selection, so the correction below picks
+      //   a working track instead of leaving the file silent.
+      // The track list read above is reused for the check, so this costs no extra
+      // property reads.
+      val sessionManualPick =
+        ManualAudioSelectionTracker.hasMarkFor(
+          PlaybackSession.state.value.currentItem?.stableId.orEmpty(),
+        )
+      val savedManualValid =
+        when {
+          savedManualAudioId == 0 -> true
+          savedManualAudioId > 0 -> tracks.any { it.type == "audio" && it.id == savedManualAudioId }
+          else -> false
+        }
+      if (!sessionManualPick && !savedManualValid) {
         ensureAudioTrackSelected(tracks, expectedGeneration)
       }
     }

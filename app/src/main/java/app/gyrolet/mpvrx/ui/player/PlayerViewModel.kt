@@ -909,9 +909,11 @@ class PlayerViewModel(
   fun selectAudioTrack(track: TrackNode) {
     // Every path out of here is a deliberate pick in the track list, including the
     // yt-dlp reload below, which returns before any property is set: record the pick as
-    // a manual selection for the file it was made in.
-    ManualAudioSelectionTracker.markCurrent()
-    if (getTrackSelectionId("aid") == track.id) {
+    // a manual selection of the exact track it leaves selected (0 when the pick turns
+    // the currently selected track off), for the file it was made in.
+    val currentAudioId = getTrackSelectionId("aid")
+    ManualAudioSelectionTracker.markCurrent(if (currentAudioId == track.id) 0 else track.id)
+    if (currentAudioId == track.id) {
       setTrackSelectionId("aid", null)
       return
     }
@@ -2349,6 +2351,11 @@ fun restartFromBeginning() {
   // External subtitle tracking
   private val _externalSubtitles = mutableListOf<String>()
   val externalSubtitles: List<String> get() = _externalSubtitles.toList()
+
+  // External audio tracking, kept the same way so added tracks can be saved with the
+  // playback state and re-added on the next open.
+  private val _externalAudioTracks = mutableListOf<String>()
+  val externalAudioTracks: List<String> get() = _externalAudioTracks.toList()
 
   // Mutex to prevent race-condition duplicates when scan adds multiple subtitle URIs concurrently
   private val subtitleAddMutex = Mutex()
@@ -3812,43 +3819,64 @@ fun restartFromBeginning() {
 
   fun addAudio(uri: Uri) {
     viewModelScope.launch(Dispatchers.IO) {
-      runCatching {
-        if (uri.scheme == "content") {
-          try {
-            appContext.contentResolver.takePersistableUriPermission(
-              uri,
-              Intent.FLAG_GRANT_READ_URI_PERMISSION,
-            )
-          } catch (e: SecurityException) {
-            android.util.Log.i(
-              "PlayerViewModel",
-              "Persistent permission not taken for audio $uri",
-            )
-          }
-        }
+      addAudioSuspend(uri)
+    }
+  }
 
-        val path =
-          uri.resolveUri(appContext)
-            ?: return@launch withContext(Dispatchers.Main) {
-              showToast("Failed to load audio file: Invalid URI")
+  suspend fun addAudioSuspend(
+    uri: Uri,
+    silent: Boolean = false,
+  ) {
+    val uriString = uri.toString()
+    if (_externalAudioTracks.contains(uriString)) return
+
+    try {
+      if (uri.scheme == "content") {
+        try {
+          appContext.contentResolver.takePersistableUriPermission(
+            uri,
+            Intent.FLAG_GRANT_READ_URI_PERMISSION,
+          )
+        } catch (e: SecurityException) {
+          android.util.Log.i(
+            "PlayerViewModel",
+            "Persistent permission not taken for audio $uri",
+          )
+        }
+      }
+
+      val path =
+        uri.resolveUri(appContext)
+          ?: run {
+            if (!silent) {
+              withContext(Dispatchers.Main) {
+                showToast("Failed to load audio file: Invalid URI")
+              }
             }
-
-        val title = getFileNameFromUri(uri)?.substringBeforeLast(".")?.ifBlank { null }
-
-        withContext(Dispatchers.Main) {
-          if (title != null) {
-            PlaybackSession.command("audio-add", path, "cached", title)
-          } else {
-            PlaybackSession.command("audio-add", path, "cached")
+            return
           }
-          showToast("Audio track added")
+
+      val title = getFileNameFromUri(uri)?.substringBeforeLast(".")?.ifBlank { null }
+
+      withContext(Dispatchers.Main) {
+        if (title != null) {
+          PlaybackSession.command("audio-add", path, "cached", title)
+        } else {
+          PlaybackSession.command("audio-add", path, "cached")
         }
-      }.onFailure { e ->
+        if (!silent) showToast("Audio track added")
+      }
+
+      // Track the source URI for persistence, like external subtitles: without it the
+      // track is gone on the next open while a saved selection may still point at it.
+      _externalAudioTracks.add(uriString)
+    } catch (e: Exception) {
+      if (!silent) {
         withContext(Dispatchers.Main) {
           showToast("Failed to load audio: ${e.message}")
         }
-        android.util.Log.e("PlayerViewModel", "Error adding audio", e)
       }
+      android.util.Log.e("PlayerViewModel", "Error adding audio", e)
     }
   }
 
@@ -4464,6 +4492,8 @@ fun restartFromBeginning() {
       videoHashJob?.cancel()
       // Clear external subtitles when media changes
       _externalSubtitles.clear()
+      // Clear external audio tracks when media changes
+      _externalAudioTracks.clear()
       // Reset subtitle hash when media changes.
       _videoHash.value = null
       scanLocalSubtitles(mediaTitle)

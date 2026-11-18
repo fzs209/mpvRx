@@ -34,6 +34,8 @@ internal data class PlaybackStateSnapshot(
   val isPositionRestorePending: Boolean = false,
   /** A live stream's position is a moment in a broadcast that will be gone on the next visit. */
   val isLive: Boolean = false,
+  // Separator-joined URIs of the external audio tracks added by hand for this file.
+  val externalAudio: String = "",
 )
 
 internal object PlaybackStatePersistence {
@@ -78,6 +80,10 @@ internal object PlaybackStatePersistence {
       audioDelay = snapshot.audioDelayMs,
       timeRemaining = timeRemaining,
       externalSubtitles = snapshot.externalSubtitles,
+      // A capture can run before the saved external audio tracks have been re-added for
+      // this open, in which case the snapshot carries none; keep the stored list then
+      // instead of wiping it.
+      externalAudio = snapshot.externalAudio.ifBlank { oldState?.externalAudio.orEmpty() },
       hasBeenWatched =
         isWatched(
           oldState = oldState,

@@ -971,15 +971,31 @@ val MIGRATION_30_31 =
 /**
  * PlaybackStateEntity gains a flag saying whether the saved audio track was picked by hand.
  * Rows written before this column existed stored whatever track was playing at exit, with no
- * way to tell a manual pick from an automatic one. Treat an existing saved track as a manual
- * selection so an upgrade does not silently discard it; a saved audio-off from before cannot
- * be recognised, because it was stored as -1, the same value as no saved selection.
+ * way to tell a manual pick from an automatic one, so every existing row starts with the
+ * flag unset: those files are decided by the automatic rules again until the user picks a
+ * track by hand. A saved audio-off from before cannot be recognised either, because it was
+ * stored as -1, the same value as no saved selection.
  */
 val MIGRATION_31_32 =
   object : Migration(31, 32) {
     override fun migrate(db: SupportSQLiteDatabase) {
       db.execSQL("ALTER TABLE `PlaybackStateEntity` ADD COLUMN `hasManualAudioSelection` INTEGER NOT NULL DEFAULT 0")
-      db.execSQL("UPDATE `PlaybackStateEntity` SET `hasManualAudioSelection` = 1 WHERE `aid` > 0")
+    }
+  }
+
+/**
+ * Two corrections in one step. Devices that already ran the first shipped form of the
+ * 31 -> 32 migration had every saved track marked as a manual selection; clear the flag
+ * everywhere so those records follow the same rule as the corrected migration above (this
+ * also drops manual marks made by that interim build). And PlaybackStateEntity gains the
+ * stored list of external audio tracks the user added by hand, so they can be re-added on
+ * the next open like external subtitles already are.
+ */
+val MIGRATION_32_33 =
+  object : Migration(32, 33) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+      db.execSQL("UPDATE `PlaybackStateEntity` SET `hasManualAudioSelection` = 0")
+      db.execSQL("ALTER TABLE `PlaybackStateEntity` ADD COLUMN `externalAudio` TEXT NOT NULL DEFAULT ''")
     }
   }
 
@@ -1053,6 +1069,7 @@ val DatabaseModule =
           MIGRATION_29_30,
           MIGRATION_30_31,
           MIGRATION_31_32,
+          MIGRATION_32_33,
         ).build()
     }
 

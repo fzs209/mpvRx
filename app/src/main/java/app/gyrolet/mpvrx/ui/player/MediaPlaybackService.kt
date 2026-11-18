@@ -2083,6 +2083,9 @@ class MediaPlaybackService :
     if (identifier.isBlank()) return null
 
     return PlaybackSession.readLoadedPlaybackState(identifier) { position, duration ->
+      // A disabled audio track ("no") is a deliberate choice: record it as 0 so a
+      // later restore can tell it apart from -1, which means no selection was saved.
+      val capturedAid = readMpvTrackId("aid", oldState?.aid ?: -1, noValue = 0)
       PlaybackStateSnapshot(
         mediaIdentifier = identifier,
         mediaTitle = mediaTitle.ifBlank { identifier },
@@ -2103,10 +2106,12 @@ class MediaPlaybackService :
             ) * PLAYBACK_STATE_MILLISECONDS_TO_SECONDS
           ).toInt(),
         subSpeed = readMpvDouble("sub-speed", oldState?.subSpeed ?: DEFAULT_PLAYBACK_STATE_SUB_SPEED),
-        // A disabled audio track ("no") is a deliberate choice: record it as 0 so a
-        // later restore can tell it apart from -1, which means no selection was saved.
-        aid = readMpvTrackId("aid", oldState?.aid ?: -1, noValue = 0),
-        hasManualAudioSelection = ManualAudioSelectionTracker.isMarkedFor(identifier),
+        aid = capturedAid,
+        // The mark counts only when the track being saved is the exact track the user
+        // picked by hand; an automatic change after the pick must not be stored as
+        // their choice.
+        hasManualAudioSelection = ManualAudioSelectionTracker.isMarkedFor(identifier, capturedAid),
+        externalAudio = oldState?.externalAudio.orEmpty(),
         audioDelayMs =
           (
             readMpvDouble(

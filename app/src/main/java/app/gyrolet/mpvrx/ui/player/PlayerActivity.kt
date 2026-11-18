@@ -5271,7 +5271,7 @@ class PlayerActivity :
         hasState = restored.hasSavedTracks,
         expectedGeneration = loadGeneration,
         savedSubtitlesOff = restored.subtitlesOff,
-        savedManualAudioSelection = restored.hasManualAudioSelection,
+        savedManualAudioId = restored.manualAudioId,
       )
     }
 
@@ -5605,6 +5605,10 @@ class PlayerActivity :
     if (saveIdentifier.isBlank()) return null
 
     return PlaybackSession.readLoadedPlaybackState(saveIdentifier) { position, duration ->
+      // player.aid reads "no" as -1, which is also the no-saved-selection value, so a
+      // deliberate audio-off would be lost here. Read the property text instead: "no"
+      // is saved as 0, a deliberate choice the restore can tell apart from -1.
+      val capturedAid = if (PlaybackSession.getPropertyString("aid") == "no") 0 else player.aid
       PlaybackStateSnapshot(
         mediaIdentifier = saveIdentifier,
         mediaTitle = mediaTitle,
@@ -5619,13 +5623,14 @@ class PlayerActivity :
         secondarySid = player.secondarySid,
         subDelayMs = ((PlaybackSession.getPropertyDouble("sub-delay") ?: 0.0) * MILLISECONDS_TO_SECONDS).toInt(),
         subSpeed = PlaybackSession.getPropertyDouble("sub-speed") ?: DEFAULT_SUB_SPEED,
-        // player.aid reads "no" as -1, which is also the no-saved-selection value, so a
-        // deliberate audio-off would be lost here. Read the property text instead: "no"
-        // is saved as 0, a deliberate choice the restore can tell apart from -1.
-        aid = if (PlaybackSession.getPropertyString("aid") == "no") 0 else player.aid,
-        hasManualAudioSelection = ManualAudioSelectionTracker.isMarkedFor(saveIdentifier),
+        aid = capturedAid,
+        // The mark counts only when the track being saved is the exact track the user
+        // picked by hand; an automatic change after the pick (a paired audio track from
+        // a video-quality change, a format reload) must not be stored as their choice.
+        hasManualAudioSelection = ManualAudioSelectionTracker.isMarkedFor(saveIdentifier, capturedAid),
         audioDelayMs = ((PlaybackSession.getPropertyDouble("audio-delay") ?: 0.0) * MILLISECONDS_TO_SECONDS).toInt(),
         externalSubtitles = viewModel.externalSubtitles.joinToString("|"),
+        externalAudio = viewModel.externalAudioTracks.joinToString("|"),
       )
     }
   }
@@ -5672,7 +5677,8 @@ class PlayerActivity :
     val hasState: Boolean = false,
     val hasSavedTracks: Boolean = false,
     val subtitlesOff: Boolean = false,
-    val hasManualAudioSelection: Boolean = false,
+    // The saved manual audio selection: >0 = track ID, 0 = audio off, -1 = none saved.
+    val manualAudioId: Int = -1,
   )
 
   private suspend fun loadVideoPlaybackState(
@@ -5725,7 +5731,8 @@ class PlayerActivity :
         hasState = state != null || positionRestoreOverride != null,
         hasSavedTracks = state != null,
         subtitlesOff = state != null && state.sid <= 0,
-        hasManualAudioSelection = state != null && state.hasManualAudioSelection && state.aid >= 0,
+        manualAudioId =
+          if (state != null && state.hasManualAudioSelection && state.aid >= 0) state.aid else -1,
       )
     }.onFailure { e ->
       Log.e(TAG, "Error loading playback state", e)
@@ -5775,6 +5782,21 @@ class PlayerActivity :
       primaryPosition = subtitlesPreferences.subPos.get(),
       forceAssOverride = subtitlesPreferences.overrideAssSubs.get(),
     )
+
+    // Restore external audio tracks before the audio selection below: a saved manual
+    // selection can point at one of these tracks, and it only exists once it has been
+    // re-added. Re-added tracks are appended after the file's own tracks in the stored
+    // order, so a track that was added in the same order takes the ID it had when saved.
+    if (state.externalAudio.isNotBlank()) {
+      val externalAudioUris = state.externalAudio.split("|").filter { it.isNotBlank() }
+      Log.d(TAG, "Restoring ${externalAudioUris.size} external audio track(s)")
+
+      for (audioUri in externalAudioUris) {
+        if (!PlaybackSession.isCurrentGeneration(loadGeneration)) return
+        viewModel.addAudioSuspend(Uri.parse(audioUri), silent = true)
+      }
+    }
+    if (!PlaybackSession.isCurrentGeneration(loadGeneration)) return
 
     // Only a manual selection is restored, and it is restored on every load: whether the
     // load carries a position-restore override has no bearing on which audio track the
@@ -6616,10 +6638,13 @@ private suspend fun restorePlaybackPosition(state: PlaybackStateEntity?, loadGen
       }
     // The saved manual audio selection for this file: >0 is the saved track, 0 is audio
     // off. Null when no manual selection is saved, in which case mpv picks the track by
-    // preferred language as usual.
+    // preferred language as usual. Also null when the file has saved external audio
+    // tracks: the saved track can be one of those, and it does not exist until it is
+    // re-added after the load, so the post-load restore handles those files instead of
+    // starting the load on a track that is not there.
     val initialAudioSelection =
       savedStateForLoad
-        ?.takeIf { it.hasManualAudioSelection }
+        ?.takeIf { it.hasManualAudioSelection && it.externalAudio.isBlank() }
         ?.aid
         ?.takeIf { it >= 0 }
     ensureCurrentMediaRequest(requestGeneration)
