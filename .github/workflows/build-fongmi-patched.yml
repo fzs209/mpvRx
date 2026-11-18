@@ -16,10 +16,12 @@ name: Build FongMi Patched (mpv DV sink fix)
 #
 # The native build mirrors Riteshp2001/mpvlibAndroid's own build.yml (branch
 # mpv-fongmi), restricted to arm64, with FongMi/mpv pinned to the revision the
-# patch was written for. It also drops the vo_gpu_next.c section of
-# mpvlibAndroid's mpv_video_shaders.patch: that hunk targets a different
-# vo_gpu_next.c implementation and fails against this mpv revision
-# ("video/out/vo_gpu_next.c: patch does not apply").
+# patch was written for. It also drops the gpu-next sharpen-hook section
+# of mpvlibAndroid's mpv_video_shaders.patch: that hunk is written for a
+# different gpu-next implementation and fails against this mpv revision
+# ("patch does not apply"). The section targeted video/out/vo_gpu_next.c
+# until mpvlibAndroid ported it to video/out/gpu_next/video.c on
+# 2026-11-18; both forms are dropped.
 #
 # The APK step resolves mpvlib from a local ivy directory staged by this
 # workflow via -PmpvlibReleasesUrl (see settings.gradle.kts); every other
@@ -267,10 +269,12 @@ jobs:
             "$GITHUB_WORKSPACE/native-patches/fongmi-mpv-dolby-vision-output-mode.patch"
           git -C "$mpv_dir" diff --stat
 
-          # mpvlibAndroid's shader patch carries a vo_gpu_next.c hunk written
-          # for a different vo_gpu_next.c implementation; against this mpv
-          # revision it fails with "patch does not apply". Drop only that
-          # section, keep the csputils.c and video_shaders.c hunks.
+          # mpvlibAndroid's shader patch carries a gpu-next sharpen-hook
+          # hunk written for a different gpu-next implementation; against
+          # this mpv revision it fails with "patch does not apply". Drop
+          # only that section (targeting video/out/vo_gpu_next.c, or
+          # video/out/gpu_next/video.c since the 2026-11-18 port), keep
+          # the csputils.c and video_shaders.c hunks.
           python3 - "mpvlib/buildscripts/patches/mpv_video_shaders.patch" <<'PY'
           from pathlib import Path
           import re
@@ -282,24 +286,29 @@ jobs:
           kept = []
           removed = 0
 
+          incompatible = (
+              "diff --git a/video/out/vo_gpu_next.c b/video/out/vo_gpu_next.c",
+              "diff --git a/video/out/gpu_next/video.c b/video/out/gpu_next/video.c",
+          )
+
           for section in sections:
-              if section.startswith("diff --git a/video/out/vo_gpu_next.c b/video/out/vo_gpu_next.c"):
+              if section.startswith(incompatible):
                   removed += 1
                   continue
               kept.append(section)
 
           if removed != 1:
               raise SystemExit(
-                  "Expected exactly one incompatible vo_gpu_next.c shader patch section; "
+                  "Expected exactly one incompatible gpu-next shader patch section; "
                   f"found {removed}. Refusing to alter the native patch."
               )
 
           filtered = "".join(kept)
-          if "diff --git a/video/out/vo_gpu_next.c b/video/out/vo_gpu_next.c" in filtered:
-              raise SystemExit("vo_gpu_next.c shader patch section was not fully removed")
+          if any(header in filtered for header in incompatible):
+              raise SystemExit("gpu-next shader patch section was not fully removed")
 
           patch.write_text(filtered, encoding="utf-8")
-          print("Excluded the incompatible vo_gpu_next.c shader section; retained csputils.c and video_shaders.c.")
+          print("Excluded the incompatible gpu-next shader section; retained csputils.c and video_shaders.c.")
           PY
 
       - name: Build AAR for arm64
