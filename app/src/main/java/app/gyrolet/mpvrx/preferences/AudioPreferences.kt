@@ -65,6 +65,11 @@ class AudioPreferences(
   val audioAmbientMode = preferenceStore.getBoolean("audio_ambient_mode", true)
   val immersiveArtwork = preferenceStore.getBoolean("audio_immersive_artwork", false)
   val animatedAlbumArtwork = preferenceStore.getBoolean("audio_animated_album_artwork", false)
+  val animatedArtworkAppleMusic = preferenceStore.getBoolean("audio_animated_artwork_apple_music", true)
+  val animatedArtworkTidal = preferenceStore.getBoolean("audio_animated_artwork_tidal", true)
+  val animatedArtworkSpotifyCanvas = preferenceStore.getBoolean("audio_animated_artwork_spotify_canvas", true)
+  val tidalClientId = preferenceStore.getString("tidal_client_id", "")
+  val tidalClientSecret = preferenceStore.getString("tidal_client_secret", "")
   val audioWavySeekbar = preferenceStore.getBoolean("audio_wavy_seekbar", true)
   val enabledMusicTabs = preferenceStore.getStringSet(
     "enabled_music_tabs",
@@ -120,6 +125,13 @@ class AudioPreferences(
     mediaId: String?,
   ): Boolean =
     if (behavior == BackgroundPlaybackBehavior.Remember) globalChoice else mediaId != null && mediaId in enabledVideos
+
+  /** mpv's ao list: AudioTrack while this app's passthrough setting is in effect. */
+  fun mpvAudioOutput(): String {
+    val passthrough =
+      if (MpvConfigOverridePolicy.isOwnedByMpvConf("audio-spdif")) AudioPassthrough.Off else audioPassthrough.get()
+    return passthrough.audioOutput(audioOutput.get())
+  }
 
   init {
     if (preferenceStore.getString("background_playback_behavior").get() == "ResetAfterVideo") {
@@ -197,6 +209,15 @@ enum class AudioPassthrough(
   DolbyDigital(R.string.pref_audio_passthrough_dolby, "ac3,eac3"),
   DolbyDigitalAndDts(R.string.pref_audio_passthrough_dolby_dts, "ac3,eac3,dts"),
   All(R.string.pref_audio_passthrough_all, "ac3,eac3,dts,dts-hd,truehd"),
+  ;
+
+  /**
+   * mpv's ao list while this passthrough mode is set. Only AudioTrack bitstreams: AAudio before
+   * Android 14 and OpenSL ES open a passthrough format as PCM, so mpv would decode instead of
+   * trying AudioTrack.
+   */
+  fun audioOutput(output: AudioOutput): String =
+    if (this == Off) output.mpvValue else AudioOutput.AudioTrack.mpvValue
 }
 
 enum class AudioChannels(

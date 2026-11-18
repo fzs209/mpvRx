@@ -85,9 +85,7 @@ private val settingsSearchListAnchors: Map<Screen, List<SettingsSearchListAnchor
         SettingsSearchListAnchor(titleRes = R.string.pref_gesture_tap_thumbnail_to_select_title, itemIndex = 5),
         SettingsSearchListAnchor(titleRes = R.string.pref_appearance_show_network_thumbnails_title, itemIndex = 5),
         SettingsSearchListAnchor(titleRes = R.string.profile_layout_title, itemIndex = 7),
-        SettingsSearchListAnchor(titleRes = R.string.profile_layout_hubs, itemIndex = 7),
         SettingsSearchListAnchor(titleRes = R.string.profile_layout_sections, itemIndex = 7),
-        SettingsSearchListAnchor(titleRes = R.string.profile_layout_statistics, itemIndex = 7),
       ),
     LiquidGlassPreferencesScreen to
       listOf(
@@ -203,6 +201,11 @@ private val settingsSearchListAnchors: Map<Screen, List<SettingsSearchListAnchor
         SettingsSearchListAnchor(titleRes = R.string.pref_audio_immersive_artwork_title, itemIndex = 5),
         SettingsSearchListAnchor(titleRes = R.string.pref_audio_wavy_seekbar_title, itemIndex = 5),
         SettingsSearchListAnchor(titleRes = R.string.pref_audio_animated_artwork_title, itemIndex = 5),
+        SettingsSearchListAnchor(titleRes = R.string.pref_audio_animated_artwork_apple_music_title, itemIndex = 5),
+        SettingsSearchListAnchor(titleRes = R.string.pref_audio_animated_artwork_tidal_title, itemIndex = 5),
+        SettingsSearchListAnchor(titleRes = R.string.pref_tidal_client_id, itemIndex = 5),
+        SettingsSearchListAnchor(titleRes = R.string.pref_tidal_client_secret, itemIndex = 5),
+        SettingsSearchListAnchor(titleRes = R.string.pref_audio_animated_artwork_spotify_canvas_title, itemIndex = 5),
         SettingsSearchListAnchor(titleRes = R.string.pref_preferred_languages, itemIndex = 7),
         SettingsSearchListAnchor(titleRes = R.string.pref_audio_pitch_correction_title, itemIndex = 7),
         SettingsSearchListAnchor(titleRes = R.string.pref_audio_volume_normalization_title, itemIndex = 7),

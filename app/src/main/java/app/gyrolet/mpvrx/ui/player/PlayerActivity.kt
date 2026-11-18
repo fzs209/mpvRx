@@ -1706,7 +1706,7 @@ class PlayerActivity :
   private fun setupCastPlayback() {
     // Use WeakReferences for all ViewModel-capturing lambdas to prevent
     // CastPlaybackController.instance (static) from keeping PlayerViewModel alive
-    // after onCleared() — fixes 21.5 kB LeakCanary-reported retain chain.
+    // after onCleared() — fixes a 21.5 kB retained chain.
     val vmRef = java.lang.ref.WeakReference(viewModel)
     castPlaybackController =
       CastPlaybackController(

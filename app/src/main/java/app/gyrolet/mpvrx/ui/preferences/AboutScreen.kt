@@ -71,7 +71,6 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import app.gyrolet.mpvrx.BuildConfig
 import app.gyrolet.mpvrx.R
 import app.gyrolet.mpvrx.domain.update.AppUpdateChannel
-import app.gyrolet.mpvrx.presentation.Screen
 import app.gyrolet.mpvrx.presentation.crash.CrashActivity.Companion.collectDeviceInfo
 import app.gyrolet.mpvrx.ui.components.IconSwitch
 import app.gyrolet.mpvrx.ui.components.themedSegmentedButtonColors
@@ -86,7 +85,7 @@ import java.util.Locale
 import kotlinx.serialization.Serializable
 
 @Serializable
-object AboutScreen : Screen {
+object AboutScreen : ScrollableSettingsScreen {
   @Suppress("DEPRECATION")
   @OptIn(ExperimentalMaterial3Api::class)
   @Composable
@@ -98,7 +97,7 @@ object AboutScreen : Screen {
     val versionName =
       packageInfo.versionName
         ?.let { value ->
-          if (BuildConfig.IS_PREVIEW_BUILD || BuildConfig.IS_EXPERIMENTAL_BUILD) value else value.substringBefore('-')
+          if (BuildConfig.IS_PREVIEW_BUILD) value else value.substringBefore('-')
         }
         ?: BuildConfig.VERSION_NAME
     val buildType = BuildConfig.BUILD_TYPE
@@ -141,7 +140,8 @@ object AboutScreen : Screen {
         modifier =
           Modifier
             .padding(paddingValues)
-            .verticalScroll(settingsScrollState),
+            .verticalScroll(settingsScrollState)
+            .padding(settingsContentPadding()),
       ) {
         PreferenceCard {
           Box(
@@ -581,7 +581,6 @@ object AboutScreen : Screen {
                             when (channel) {
                               AppUpdateChannel.STABLE -> R.string.ui_update_channel_stable_short
                               AppUpdateChannel.PREVIEW -> R.string.ui_update_channel_preview_short
-                              AppUpdateChannel.EXPERIMENTAL -> R.string.ui_update_channel_experimental_short
                             },
                           ),
                           maxLines = 1,
@@ -1077,13 +1076,6 @@ internal val OPEN_SOURCE_LIBRARIES =
       descriptionRes = R.string.oss_androidx_lifecycle_description,
       license = "Apache-2.0",
       url = "https://developer.android.com/jetpack/androidx/releases/lifecycle",
-    ),
-    OpenSourceLibrary(
-      name = "LeakCanary",
-      artifact = "com.squareup.leakcanary:leakcanary-android",
-      descriptionRes = R.string.oss_leakcanary_description,
-      license = "Apache-2.0",
-      url = "https://github.com/square/leakcanary",
     ),
     OpenSourceLibrary(
       name = "Python",
