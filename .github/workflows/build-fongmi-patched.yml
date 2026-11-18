@@ -32,7 +32,7 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - fix/fongmi-legacy-gpu-osd-crash
+      - fongmi-fixes
 
 permissions:
   contents: read
