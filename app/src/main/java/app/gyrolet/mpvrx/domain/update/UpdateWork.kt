@@ -4,7 +4,6 @@ package app.gyrolet.mpvrx.domain.update
 import android.content.Context
 import android.os.Build
 import android.os.SystemClock
-import android.util.Log
 import androidx.work.BackoffPolicy
 import androidx.work.Constraints
 import androidx.work.CoroutineWorker
@@ -73,15 +72,6 @@ object UpdateWork {
       val saved = storage(context).getString("state", null)
       mutableState.value = saved?.let { runCatching { json.decodeFromString<UpdateTaskState>(it) }.getOrNull() }
         ?: UpdateTaskState()
-      val restoredRelease = mutableState.value.release
-      if (restoredRelease?.channel.equals("experimental", ignoreCase = true) ||
-        restoredRelease?.tagName?.startsWith("experimental", ignoreCase = true) == true
-      ) {
-        Log.i("UpdateWork", "Discarding a pending update from the retired Experimental channel")
-        mutableState.value = UpdateTaskState()
-        check(storage(context).edit().putString("state", json.encodeToString(mutableState.value)).commit())
-        WorkManager.getInstance(context).cancelUniqueWork(DOWNLOAD_WORK)
-      }
       if (mutableState.value.release?.let { UpdateManager(context).isInstalledRelease(it) } == true) {
         mutableState.value = UpdateTaskState(stage = UpdateStage.COMPLETE)
         check(storage(context).edit().putString("state", json.encodeToString(mutableState.value)).commit())
@@ -105,6 +95,7 @@ object UpdateWork {
   fun selectedChannel(context: Context): AppUpdateChannel {
     val saved = context.getSharedPreferences("mpvrx_prefs", Context.MODE_PRIVATE).getString("app_update_channel", null)
     return saved?.let(AppUpdateChannel::fromStoredValue) ?: when {
+      BuildConfig.IS_EXPERIMENTAL_BUILD -> AppUpdateChannel.EXPERIMENTAL
       BuildConfig.IS_PREVIEW_BUILD -> AppUpdateChannel.PREVIEW
       else -> AppUpdateChannel.STABLE
     }

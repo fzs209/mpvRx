@@ -66,6 +66,7 @@ class UpdateViewModel(application: Application) : AndroidViewModel(application) 
   private val _updateChannel = MutableStateFlow(
     prefs.getString(UPDATE_CHANNEL_KEY, null)?.let(AppUpdateChannel::fromStoredValue)
       ?: when {
+        BuildConfig.IS_EXPERIMENTAL_BUILD -> AppUpdateChannel.EXPERIMENTAL
         BuildConfig.IS_PREVIEW_BUILD -> AppUpdateChannel.PREVIEW
         else -> AppUpdateChannel.STABLE
       },
