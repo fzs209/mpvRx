@@ -26,7 +26,7 @@ internal data class PlaybackStateSnapshot(
   val secondarySid: Int,
   val subDelayMs: Int,
   val subSpeed: Double,
-  val aid: Int, // >0 = mpv track ID, 0 = user disabled audio, -1 = no saved selection
+  val aid: Int,
   val audioDelayMs: Int,
   val externalSubtitles: String,
   val isPositionRestorePending: Boolean = false,

@@ -21,8 +21,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 
 /**
- * Selects tracks using, in order: the file's own saved selection, the audio track the
- * user last picked by hand on another file, then ordered language or title preferences.
+ * Selects tracks using ordered language or title preferences, with saved selections as fallback.
  * A saved subtitles-off choice remains off. mpv.conf-owned language selection is left to mpv.
  *
  * Based on https://github.com/Chinna95P/mpv-anime-build/blob/main/scripts/track-selector.lua.
@@ -47,8 +46,6 @@ class TrackSelector(
     hasState: Boolean = false,
     expectedGeneration: Long = PlaybackSession.state.value.generation,
     savedSubtitlesOff: Boolean = false,
-    savedAudioOff: Boolean = false,
-    savedAudioSelection: Boolean = false,
   ) = withContext(Dispatchers.IO) {
     var trackCount = 0
     for (attempt in 0 until 20) {
@@ -62,7 +59,7 @@ class TrackSelector(
     if (tracks.none { it.type == "video" && !it.image }) return@withContext
 
     if (!MpvConfigOverridePolicy.ownsAny(MpvConfigControlledFeatures.AUDIO_TRACK_SELECTION)) {
-      ensureAudioTrackSelected(tracks, hasState, expectedGeneration, savedAudioOff, savedAudioSelection)
+      ensureAudioTrackSelected(tracks, hasState, expectedGeneration)
     }
     if (!MpvConfigOverridePolicy.ownsAny(MpvConfigControlledFeatures.SUBTITLE_TRACK_SELECTION)) {
       ensureSubtitleTrackSelected(tracks, hasState, expectedGeneration, savedSubtitlesOff)
@@ -94,35 +91,13 @@ class TrackSelector(
       }
     }
 
-  private fun ensureAudioTrackSelected(
-    tracks: List<Track>,
-    hasState: Boolean,
-    generation: Long,
-    savedAudioOff: Boolean,
-    savedAudioSelection: Boolean,
-  ) {
+  private fun ensureAudioTrackSelected(tracks: List<Track>, hasState: Boolean, generation: Long) {
     val current = getTrackSelectionId("aid")
     val audioTracks = tracks.filter { it.type == "audio" }
-    if (hasState && savedAudioOff) {
-      if (current > 0) selectTrack("aid", 0, generation, "Saved audio-off choice")
-      return
-    }
-    // A selection restored from this file's own saved state is the user's choice for
-    // this file; neither the cross-file memory nor the language preferences override it.
-    if (hasState && savedAudioSelection && audioTracks.any { it.id == current }) return
-
-    val cleanTracks = audioTracks.filter { track -> ignoredAudioTitles.none { track.title.contains(it) } }
-
-    // Cross-file memory: re-apply the last track the user picked by hand, matched
-    // against the track list already read for this load — no extra mpv or disk IO.
-    rememberedAudioTrack(cleanTracks)?.let { match ->
-      selectTrack("aid", match.id, generation, "Remembered audio track")
-      return
-    }
-
     val preferences = preferences(audioPreferences.preferredLanguages.get())
     if (hasState && preferences.isEmpty() && audioTracks.any { it.id == current }) return
 
+    val cleanTracks = audioTracks.filter { track -> ignoredAudioTitles.none { track.title.contains(it) } }
     for (preference in preferences) {
       val match = cleanTracks.mapNotNull { track -> matchRank(track, preference)?.let { track to it } }
         .minByOrNull { it.second }?.first
@@ -133,37 +108,6 @@ class TrackSelector(
     }
     if (audioTracks.any { it.id == current }) return
     cleanTracks.firstOrNull()?.let { selectTrack("aid", it.id, generation, "Clean audio fallback") }
-  }
-
-  /**
-   * Finds the remembered manually-picked audio track among this file's clean tracks.
-   * An exact title match (with a compatible language, when both sides carry one) wins;
-   * otherwise the best same-language track — the default-flagged one when several
-   * share the language. Commentary/description tracks never match: they were already
-   * filtered out of [cleanTracks]. Costs two in-memory preference reads and one pass
-   * over the already-loaded track list.
-   */
-  private fun rememberedAudioTrack(cleanTracks: List<Track>): Track? {
-    val lang = audioPreferences.rememberedAudioTrackLang.get().trim().lowercase(Locale.ROOT)
-    val title = audioPreferences.rememberedAudioTrackTitle.get().trim().lowercase(Locale.ROOT)
-    if (lang.isEmpty() && title.isEmpty()) return null
-    if (title.isNotEmpty()) {
-      cleanTracks.firstOrNull { track ->
-        track.title == title && (lang.isEmpty() || track.lang.isEmpty() || sameLanguage(track.lang, lang))
-      }?.let { return it }
-    }
-    if (lang.isEmpty()) return null
-    return cleanTracks
-      .filter { track -> sameLanguage(track.lang, lang) }
-      .minByOrNull { track -> if (track.isDefault) 0 else 1 }
-  }
-
-  /** Language equality tolerant of tag variants (jpn vs ja, eng vs en, zh-cn vs zh). */
-  private fun sameLanguage(trackLang: String, rememberedLang: String): Boolean {
-    if (trackLang == rememberedLang) return true
-    val trackTag = languageTag(trackLang) ?: return false
-    val rememberedTag = languageTag(rememberedLang) ?: return false
-    return trackTag.substringBefore('-') == rememberedTag.substringBefore('-')
   }
 
   private fun ensureSubtitleTrackSelected(
