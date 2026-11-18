@@ -5271,6 +5271,7 @@ class PlayerActivity :
         hasState = restored.hasSavedTracks,
         expectedGeneration = loadGeneration,
         savedSubtitlesOff = restored.subtitlesOff,
+        savedAudioOff = restored.audioOff,
       )
     }
 
@@ -5618,12 +5619,24 @@ class PlayerActivity :
         secondarySid = player.secondarySid,
         subDelayMs = ((PlaybackSession.getPropertyDouble("sub-delay") ?: 0.0) * MILLISECONDS_TO_SECONDS).toInt(),
         subSpeed = PlaybackSession.getPropertyDouble("sub-speed") ?: DEFAULT_SUB_SPEED,
-        aid = player.aid,
+        aid = captureAudioTrackId(),
         audioDelayMs = ((PlaybackSession.getPropertyDouble("audio-delay") ?: 0.0) * MILLISECONDS_TO_SECONDS).toInt(),
         externalSubtitles = viewModel.externalSubtitles.joinToString("|"),
       )
     }
   }
+
+  /**
+   * Reads the current audio selection for the playback-state snapshot. mpv reports a disabled
+   * audio track as "no"; that is a deliberate user choice, so it is recorded as 0 to stay
+   * distinguishable from -1, which means no selection was ever saved for the file.
+   */
+  private fun captureAudioTrackId(): Int =
+    when (val value = PlaybackSession.getPropertyString("aid")) {
+      null -> -1
+      "no" -> 0
+      else -> value.toIntOrNull() ?: -1
+    }
 
   private fun readMpvIntSeconds(
     property: String,
@@ -5667,6 +5680,7 @@ class PlayerActivity :
     val hasState: Boolean = false,
     val hasSavedTracks: Boolean = false,
     val subtitlesOff: Boolean = false,
+    val audioOff: Boolean = false,
   )
 
   private suspend fun loadVideoPlaybackState(
@@ -5706,7 +5720,7 @@ class PlayerActivity :
           }
         }
       }
-      applyPlaybackState(state, restoreAudioTrack = positionRestoreOverride == null, loadGeneration = loadGeneration)
+      applyPlaybackState(state, loadGeneration = loadGeneration)
 
       if (!PlaybackSession.isCurrentGeneration(loadGeneration)) return@runCatching LoadedPlaybackState()
 
@@ -5719,6 +5733,7 @@ class PlayerActivity :
         hasState = state != null || positionRestoreOverride != null,
         hasSavedTracks = state != null,
         subtitlesOff = state != null && state.sid <= 0,
+        audioOff = state != null && state.aid == 0,
       )
     }.onFailure { e ->
       Log.e(TAG, "Error loading playback state", e)
@@ -5734,7 +5749,6 @@ class PlayerActivity :
    */
   private suspend fun applyPlaybackState(
     state: PlaybackStateEntity?,
-    restoreAudioTrack: Boolean,
     loadGeneration: Long,
   ) {
     if (state == null) return
@@ -5770,11 +5784,18 @@ class PlayerActivity :
       forceAssOverride = subtitlesPreferences.overrideAssSubs.get(),
     )
 
-    if (restoreAudioTrack && state.aid > 0 && player.aid != state.aid &&
-      !MpvConfigOverridePolicy.ownsAny(MpvConfigControlledFeatures.AUDIO_TRACK_SELECTION)
-    ) {
-      PlaybackSession.commandForGeneration(loadGeneration, "set", "aid", state.aid.toString())
-      Log.d(TAG, "Restored audio track: ${state.aid} (user selection)")
+    if (!MpvConfigOverridePolicy.ownsAny(MpvConfigControlledFeatures.AUDIO_TRACK_SELECTION)) {
+      // The saved audio selection is restored on every load, including loads that carry a
+      // position-restore override (core recovery, script reload): those still open the same
+      // file the user made the selection on, and the subtitle selection next to this block is
+      // already restored unconditionally. A saved aid of 0 is a deliberate audio-off choice.
+      if (state.aid > 0 && player.aid != state.aid) {
+        PlaybackSession.commandForGeneration(loadGeneration, "set", "aid", state.aid.toString())
+        Log.d(TAG, "Restored audio track: ${state.aid} (user selection)")
+      } else if (state.aid == 0 && player.aid > 0) {
+        PlaybackSession.commandForGeneration(loadGeneration, "set", "aid", "no")
+        Log.d(TAG, "Restored audio track: off (user selection)")
+      }
     }
 
     PlaybackSession.setPropertyDouble("sub-delay", subDelay)

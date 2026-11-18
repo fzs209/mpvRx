@@ -22,7 +22,7 @@ data class PlaybackStateEntity(
   val secondarySid: Int = -1, // Secondary subtitle track ID (-1 means disabled)
   val subDelay: Int,
   val subSpeed: Double,
-  val aid: Int,
+  val aid: Int, // Audio track ID: >0 = mpv track ID, 0 = user disabled audio, -1 = no saved selection
   val audioDelay: Int,
   val timeRemaining: Int = 0, // in seconds (duration - lastPosition)
   val externalSubtitles: String = "", // Comma-separated list of external subtitle URIs

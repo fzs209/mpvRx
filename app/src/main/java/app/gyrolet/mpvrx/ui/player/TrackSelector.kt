@@ -46,6 +46,7 @@ class TrackSelector(
     hasState: Boolean = false,
     expectedGeneration: Long = PlaybackSession.state.value.generation,
     savedSubtitlesOff: Boolean = false,
+    savedAudioOff: Boolean = false,
   ) = withContext(Dispatchers.IO) {
     var trackCount = 0
     for (attempt in 0 until 20) {
@@ -59,7 +60,7 @@ class TrackSelector(
     if (tracks.none { it.type == "video" && !it.image }) return@withContext
 
     if (!MpvConfigOverridePolicy.ownsAny(MpvConfigControlledFeatures.AUDIO_TRACK_SELECTION)) {
-      ensureAudioTrackSelected(tracks, hasState, expectedGeneration)
+      ensureAudioTrackSelected(tracks, hasState, expectedGeneration, savedAudioOff)
     }
     if (!MpvConfigOverridePolicy.ownsAny(MpvConfigControlledFeatures.SUBTITLE_TRACK_SELECTION)) {
       ensureSubtitleTrackSelected(tracks, hasState, expectedGeneration, savedSubtitlesOff)
@@ -91,9 +92,18 @@ class TrackSelector(
       }
     }
 
-  private fun ensureAudioTrackSelected(tracks: List<Track>, hasState: Boolean, generation: Long) {
+  private fun ensureAudioTrackSelected(
+    tracks: List<Track>,
+    hasState: Boolean,
+    generation: Long,
+    savedAudioOff: Boolean,
+  ) {
     val current = getTrackSelectionId("aid")
     val audioTracks = tracks.filter { it.type == "audio" }
+    if (hasState && savedAudioOff) {
+      if (current > 0) selectTrack("aid", 0, generation, "Saved audio-off choice")
+      return
+    }
     val preferences = preferences(audioPreferences.preferredLanguages.get())
     if (hasState && preferences.isEmpty() && audioTracks.any { it.id == current }) return
 
