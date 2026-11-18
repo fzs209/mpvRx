@@ -31,7 +31,7 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - fix/fongmi-legacy-gpu-osd-crash
+      - fix/audio-track-selection
 
 permissions:
   contents: read
