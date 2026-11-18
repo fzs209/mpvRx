@@ -887,7 +887,30 @@ class PlayerViewModel(
       val selectedAudio = pairedYtdlTrack(track, TrackNode::isAudio)
         ?: allTracks.value.firstOrNull { candidate -> candidate.isAudio && candidate.isSelected }
       val selector = buildYtdlFormatSelector(videoTrack = track, audioTrack = selectedAudio)
-      if (selector != null && host?.reloadCurrentYtdlFormat(selector) == true) return
+      if (selector != null) {
+        val mediaId = session.currentItem?.stableId.orEmpty()
+        val currentAudioId = getTrackSelectionId("aid")
+        val pairedAudioId = selectedAudio?.id ?: 0
+        val previousSelection = AudioTrackSelectionState.selectionFor(mediaId, expectedGeneration)
+        val pairedAudioChangesSelection = pairedAudioId != currentAudioId
+        if (pairedAudioChangesSelection && previousSelection?.mode == AudioSelectionMode.TRACK) {
+          // Clear before starting the asynchronous format reload. Once a new generation
+          // begins, an old-generation clear would be ignored and the paired stream could
+          // incorrectly inherit the user's manual selection.
+          AudioTrackSelectionState.clearManualSelection(mediaId, expectedGeneration)
+        }
+        if (host?.reloadCurrentYtdlFormat(selector) == true) return
+        // The reload was declined; restore the original intent for the still-playing file.
+        if (pairedAudioChangesSelection && previousSelection != null) {
+          when (previousSelection.mode) {
+            AudioSelectionMode.TRACK -> previousSelection.track?.let {
+              AudioTrackSelectionState.markManualTrack(mediaId, expectedGeneration, it)
+            }
+            AudioSelectionMode.OFF -> AudioTrackSelectionState.markManualOff(mediaId, expectedGeneration)
+            AudioSelectionMode.AUTO -> Unit
+          }
+        }
+      }
     }
 
     val selectedProgramIds = track.effectiveProgramIds.toSet()
@@ -907,22 +930,44 @@ class PlayerViewModel(
   }
 
   fun selectAudioTrack(track: TrackNode) {
+    val session = PlaybackSession.state.value
+    val mediaId = session.currentItem?.stableId.orEmpty()
+    val generation = session.generation
+    if (mediaId.isBlank() || generation <= 0L ||
+      session.phase !in setOf(PlaybackPhase.READY, PlaybackPhase.BACKGROUND)
+    ) return
+
     if (getTrackSelectionId("aid") == track.id) {
-      setTrackSelectionId("aid", null)
+      PlaybackSession.setPropertyString("aid", "no")
+      AudioTrackSelectionState.markManualOff(mediaId, generation)
       return
     }
 
-    if (currentItemRequiresYtdlp() &&
-      !MpvConfigOverridePolicy.isOwnedByMpvConf("ytdl-format") &&
-      ytdlFormatId(track) != null
-    ) {
-      val selectedVideo = pairedYtdlTrack(track, TrackNode::isVideo)
-        ?: allTracks.value.firstOrNull { candidate -> candidate.isVideo && candidate.isSelected }
-      val selector = buildYtdlFormatSelector(videoTrack = selectedVideo, audioTrack = track)
-      if (selector != null && host?.reloadCurrentYtdlFormat(selector) == true) return
-    }
+    val externalUri = AudioTrackSelectionState.externalUriForPath(
+      mediaId,
+      generation,
+      track.externalFilename,
+    )
+    val ytdlSelector =
+      if (currentItemRequiresYtdlp() && !MpvConfigOverridePolicy.isOwnedByMpvConf("ytdl-format") && ytdlFormatId(track) != null) {
+        val selectedVideo = pairedYtdlTrack(track, TrackNode::isVideo)
+          ?: allTracks.value.firstOrNull { candidate -> candidate.isVideo && candidate.isSelected }
+        buildYtdlFormatSelector(videoTrack = selectedVideo, audioTrack = track)
+      } else {
+        null
+      }
+    val identity = (readLoadedAudioTrackIdentity(generation, track.id) ?: AudioTrackIdentity.from(track)).copy(
+      externalUri = externalUri,
+      ytdlFormatSelector = ytdlSelector,
+    )
+    // Record the intent before a yt-dlp format reload starts a new generation. The full
+    // selector is persisted as well as the stream identity, because a selected audio format
+    // may not be present in the default format loaded next time.
+    AudioTrackSelectionState.markManualTrack(mediaId, generation, identity)
 
-    setTrackSelectionId("aid", track.id)
+    if (ytdlSelector != null && host?.reloadCurrentYtdlFormat(ytdlSelector) == true) return
+
+    PlaybackSession.setPropertyString("aid", track.id.toString())
   }
 
   private fun currentItemRequiresYtdlp(): Boolean {
@@ -3807,44 +3852,98 @@ fun restartFromBeginning() {
   // ==================== Audio/Subtitle Management ====================
 
   fun addAudio(uri: Uri) {
+    val generation = PlaybackSession.state.value.generation
     viewModelScope.launch(Dispatchers.IO) {
-      runCatching {
-        if (uri.scheme == "content") {
-          try {
-            appContext.contentResolver.takePersistableUriPermission(
-              uri,
-              Intent.FLAG_GRANT_READ_URI_PERMISSION,
-            )
-          } catch (e: SecurityException) {
-            android.util.Log.i(
-              "PlayerViewModel",
-              "Persistent permission not taken for audio $uri",
-            )
-          }
-        }
+      addAudioSuspend(uri, expectedGeneration = generation)
+    }
+  }
 
-        val path =
-          uri.resolveUri(appContext)
-            ?: return@launch withContext(Dispatchers.Main) {
-              showToast("Failed to load audio file: Invalid URI")
+  /**
+   * Adds an external audio source. Restore uses auto so merely re-attaching a saved source
+   * cannot steal selection from mpv's alang decision; a user action uses cached and records
+   * the selected track's descriptor as an explicit manual choice.
+   */
+  suspend fun addAudioSuspend(
+    uri: Uri,
+    select: Boolean = true,
+    silent: Boolean = false,
+    expectedGeneration: Long = PlaybackSession.state.value.generation,
+  ) {
+    val session = PlaybackSession.state.value
+    val mediaId = session.currentItem?.stableId.orEmpty()
+    if (mediaId.isBlank() || !PlaybackSession.isCurrentGeneration(expectedGeneration)) return
+    val uriString = uri.toString()
+    if (AudioTrackSelectionState.isExternalAudioAttached(mediaId, expectedGeneration, uriString)) return
+
+    try {
+      if (uri.scheme == "content") {
+        try {
+          appContext.contentResolver.takePersistableUriPermission(
+            uri,
+            Intent.FLAG_GRANT_READ_URI_PERMISSION,
+          )
+        } catch (e: SecurityException) {
+          android.util.Log.i(
+            "PlayerViewModel",
+            "Persistent permission not taken for audio $uri",
+          )
+        }
+      }
+
+      val path =
+        uri.resolveUri(appContext)
+          ?: run {
+            if (!silent) {
+              withContext(Dispatchers.Main) {
+                showToast("Failed to load audio file: Invalid URI")
+              }
             }
-
-        val title = getFileNameFromUri(uri)?.substringBeforeLast(".")?.ifBlank { null }
-
-        withContext(Dispatchers.Main) {
-          if (title != null) {
-            PlaybackSession.command("audio-add", path, "cached", title)
-          } else {
-            PlaybackSession.command("audio-add", path, "cached")
+            return
           }
-          showToast("Audio track added")
+      if (!PlaybackSession.isCurrentGeneration(expectedGeneration)) return
+
+      val title = getFileNameFromUri(uri)?.substringBeforeLast(".")?.ifBlank { null }
+      val addMode = if (select) "cached" else "auto"
+      val command = if (title != null) {
+        arrayOf("audio-add", path, addMode, title)
+      } else {
+        arrayOf("audio-add", path, addMode)
+      }
+      if (!PlaybackSession.commandForGeneration(expectedGeneration, *command)) return
+
+      AudioTrackSelectionState.registerExternalAudio(mediaId, expectedGeneration, uriString, path)
+
+      if (select) {
+        var selected: Pair<Int, AudioTrackIdentity>? = null
+        for (attempt in 0 until 20) {
+          if (!PlaybackSession.isCurrentGeneration(expectedGeneration)) return
+          selected = readLoadedExternalAudioTrackIdentity(expectedGeneration, path)
+          if (selected != null) break
+          delay(50)
         }
-      }.onFailure { e ->
+        val selectedIdentity = selected?.let { (trackId, identity) ->
+          if (getTrackSelectionId("aid") != trackId) {
+            PlaybackSession.commandForGeneration(expectedGeneration, "set", "aid", trackId.toString())
+          }
+          identity.copy(externalUri = uriString)
+        } ?: AudioTrackIdentity(
+          externalFilename = path,
+          externalUri = uriString,
+          title = title,
+        )
+        AudioTrackSelectionState.markManualTrack(mediaId, expectedGeneration, selectedIdentity)
+      }
+
+      if (!silent) {
+        withContext(Dispatchers.Main) { showToast("Audio track added") }
+      }
+    } catch (e: Exception) {
+      if (!silent) {
         withContext(Dispatchers.Main) {
           showToast("Failed to load audio: ${e.message}")
         }
-        android.util.Log.e("PlayerViewModel", "Error adding audio", e)
       }
+      android.util.Log.e("PlayerViewModel", "Error adding audio", e)
     }
   }
 

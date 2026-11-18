@@ -2053,11 +2053,10 @@ class MediaPlaybackService :
     runCatching {
       val oldState = playbackStateRepository.getVideoDataByTitle(identifier)
       val snapshot =
-        if (capturedSnapshot.externalSubtitles.isBlank() && !oldState?.externalSubtitles.isNullOrBlank()) {
-          capturedSnapshot.copy(externalSubtitles = oldState.externalSubtitles.orEmpty())
-        } else {
-          capturedSnapshot
-        }
+        capturedSnapshot.copy(
+          externalSubtitles = capturedSnapshot.externalSubtitles.ifBlank { oldState?.externalSubtitles.orEmpty() },
+          externalAudio = capturedSnapshot.externalAudio,
+        )
       val playbackState =
         PlaybackStatePersistence.buildEntity(
           oldState = oldState,
@@ -2112,6 +2111,22 @@ class MediaPlaybackService :
             ) * PLAYBACK_STATE_MILLISECONDS_TO_SECONDS
           ).toInt(),
         externalSubtitles = oldState?.externalSubtitles.orEmpty(),
+        audioSelection = AudioTrackSelectionState.selectionForSave(
+          identifier,
+          PlaybackSession.state.value.generation,
+        ),
+        audioSelectionResolved = AudioTrackSelectionState.isSelectionResolved(
+          identifier,
+          PlaybackSession.state.value.generation,
+        ),
+        externalAudio = AudioTrackSelectionState.externalUrisForSave(
+          identifier,
+          PlaybackSession.state.value.generation,
+        ),
+        externalAudioResolved = AudioTrackSelectionState.areExternalUrisResolved(
+          identifier,
+          PlaybackSession.state.value.generation,
+        ),
       )
     }
   }

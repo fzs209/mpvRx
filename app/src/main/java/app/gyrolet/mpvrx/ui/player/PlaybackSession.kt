@@ -1591,6 +1591,7 @@ internal fun userScriptsNeedReload(currentKey: String): Boolean {
       beginPlaybackTransitionAudioGuardLocked(canRestore = true)
 
       val generation = _state.value.generation + 1L
+      AudioTrackSelectionState.beginLoad(resolvedItem.stableId, generation)
       val initialPosition = initialPositionSeconds?.takeIf { it.isFinite() && it > 0.0 }
       pendingPositionRestoreGeneration =
         generation.takeIf {
@@ -2014,9 +2015,18 @@ internal fun userScriptsNeedReload(currentKey: String): Boolean {
         MpvConfigOverridePolicy.isOwnedByMpvConf("vid")
       ) return@withLock
 
+      val currentAudioId = MPVLib.getPropertyString("aid")?.toIntOrNull() ?: 0
       val audioEnabled = MPVLib.getPropertyString("aid") != "no"
       setPropertyInt("vid", videoTrackId)
-      if (audioEnabled && audioTrackId != null) setPropertyInt("aid", audioTrackId)
+      if (audioEnabled && audioTrackId != null) {
+        AudioTrackSelectionState.clearManualTrackWhenAudioChanges(
+          current.currentItem?.stableId.orEmpty(),
+          expectedGeneration,
+          currentAudioId,
+          audioTrackId,
+        )
+        setPropertyInt("aid", audioTrackId)
+      }
     }
   }
 

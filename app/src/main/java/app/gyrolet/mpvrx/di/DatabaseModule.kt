@@ -991,6 +991,19 @@ val MIGRATION_25_26 =
     }
   }
 
+/**
+ * Persist explicit audio-track intent separately from mpv's transient aid value.
+ * Existing aid values may have been selected automatically, so old rows deliberately
+ * migrate to AUTO rather than guessing that they were user choices.
+ */
+val MIGRATION_31_32 =
+  object : Migration(31, 32) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+      db.execSQL("ALTER TABLE `PlaybackStateEntity` ADD COLUMN `audioSelection` TEXT NOT NULL DEFAULT ''")
+      db.execSQL("ALTER TABLE `PlaybackStateEntity` ADD COLUMN `externalAudio` TEXT NOT NULL DEFAULT ''")
+    }
+  }
+
 val DatabaseModule =
   module {
     single<Json> {
@@ -1037,6 +1050,7 @@ val DatabaseModule =
           MIGRATION_28_29,
           MIGRATION_29_30,
           MIGRATION_30_31,
+          MIGRATION_31_32,
         ).build()
     }
 

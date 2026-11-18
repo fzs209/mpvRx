@@ -22,10 +22,15 @@ data class PlaybackStateEntity(
   val secondarySid: Int = -1, // Secondary subtitle track ID (-1 means disabled)
   val subDelay: Int,
   val subSpeed: Double,
+  // Last runtime aid retained for compatibility/diagnostics; never used as a durable selection.
   val aid: Int,
   val audioDelay: Int,
   val timeRemaining: Int = 0, // in seconds (duration - lastPosition)
   val externalSubtitles: String = "", // Comma-separated list of external subtitle URIs
   val hasBeenWatched: Boolean = false, // Persistent flag: true if video has ever reached the watched threshold
   val newLabelOverride: Boolean? = null,
+  // Explicit user intent: empty = AUTO, JSON TRACK = a stable descriptor, JSON OFF = audio disabled.
+  val audioSelection: String = "",
+  // JSON array of external audio URIs added for this media; restored before track selection.
+  val externalAudio: String = "",
 )

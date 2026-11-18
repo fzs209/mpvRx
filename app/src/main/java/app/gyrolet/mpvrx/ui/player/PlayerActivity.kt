@@ -5271,6 +5271,7 @@ class PlayerActivity :
         hasState = restored.hasSavedTracks,
         expectedGeneration = loadGeneration,
         savedSubtitlesOff = restored.subtitlesOff,
+        savedAudioSelection = restored.audioSelection,
       )
     }
 
@@ -5621,6 +5622,22 @@ class PlayerActivity :
         aid = player.aid,
         audioDelayMs = ((PlaybackSession.getPropertyDouble("audio-delay") ?: 0.0) * MILLISECONDS_TO_SECONDS).toInt(),
         externalSubtitles = viewModel.externalSubtitles.joinToString("|"),
+        audioSelection = AudioTrackSelectionState.selectionForSave(
+          saveIdentifier,
+          PlaybackSession.state.value.generation,
+        ),
+        audioSelectionResolved = AudioTrackSelectionState.isSelectionResolved(
+          saveIdentifier,
+          PlaybackSession.state.value.generation,
+        ),
+        externalAudio = AudioTrackSelectionState.externalUrisForSave(
+          saveIdentifier,
+          PlaybackSession.state.value.generation,
+        ),
+        externalAudioResolved = AudioTrackSelectionState.areExternalUrisResolved(
+          saveIdentifier,
+          PlaybackSession.state.value.generation,
+        ),
       )
     }
   }
@@ -5667,6 +5684,7 @@ class PlayerActivity :
     val hasState: Boolean = false,
     val hasSavedTracks: Boolean = false,
     val subtitlesOff: Boolean = false,
+    val audioSelection: String = "",
   )
 
   private suspend fun loadVideoPlaybackState(
@@ -5687,6 +5705,12 @@ class PlayerActivity :
 
     return runCatching {
       val state = resolvePlaybackState(identifier, legacyIdentifier)
+      AudioTrackSelectionState.rememberExternalUris(
+        identifier,
+        loadGeneration,
+        AudioTrackSelectionCodec.decodeUris(state?.externalAudio),
+      )
+      AudioTrackSelectionState.restoreSavedSelection(identifier, loadGeneration, state?.audioSelection)
 
       if (!PlaybackSession.isCurrentGeneration(loadGeneration)) return@runCatching LoadedPlaybackState()
 
@@ -5706,9 +5730,12 @@ class PlayerActivity :
           }
         }
       }
-      applyPlaybackState(state, restoreAudioTrack = positionRestoreOverride == null, loadGeneration = loadGeneration)
+      applyPlaybackState(state, loadGeneration = loadGeneration)
 
       if (!PlaybackSession.isCurrentGeneration(loadGeneration)) return@runCatching LoadedPlaybackState()
+      // External tracks can exist only in the live controller after an unsaved same-media
+      // format reload. Restore them even when this file has no Room playback-state row.
+      restoreExternalAudioTracks(identifier, loadGeneration, state?.externalAudio)
 
       withContext(Dispatchers.Main) {
         if (!PlaybackSession.isCurrentGeneration(loadGeneration)) return@withContext
@@ -5719,10 +5746,35 @@ class PlayerActivity :
         hasState = state != null || positionRestoreOverride != null,
         hasSavedTracks = state != null,
         subtitlesOff = state != null && state.sid <= 0,
+        audioSelection = state?.audioSelection.orEmpty(),
       )
     }.onFailure { e ->
       Log.e(TAG, "Error loading playback state", e)
     }.getOrDefault(LoadedPlaybackState())
+  }
+
+  private suspend fun restoreExternalAudioTracks(
+    identifier: String,
+    loadGeneration: Long,
+    persistedValue: String?,
+  ) {
+    val uris = AudioTrackSelectionState.externalUrisForRestore(
+      identifier,
+      loadGeneration,
+      AudioTrackSelectionCodec.decodeUris(persistedValue),
+    )
+    AudioTrackSelectionState.rememberExternalUris(identifier, loadGeneration, uris)
+    if (uris.isEmpty()) return
+    Log.d(TAG, "Restoring ${uris.size} external audio track(s)")
+    for (audioUri in uris) {
+      if (!PlaybackSession.isCurrentGeneration(loadGeneration)) return
+      viewModel.addAudioSuspend(
+        uri = Uri.parse(audioUri),
+        select = false,
+        silent = true,
+        expectedGeneration = loadGeneration,
+      )
+    }
   }
 
   /**
@@ -5734,7 +5786,6 @@ class PlayerActivity :
    */
   private suspend fun applyPlaybackState(
     state: PlaybackStateEntity?,
-    restoreAudioTrack: Boolean,
     loadGeneration: Long,
   ) {
     if (state == null) return
@@ -5770,12 +5821,6 @@ class PlayerActivity :
       forceAssOverride = subtitlesPreferences.overrideAssSubs.get(),
     )
 
-    if (restoreAudioTrack && state.aid > 0 && player.aid != state.aid &&
-      !MpvConfigOverridePolicy.ownsAny(MpvConfigControlledFeatures.AUDIO_TRACK_SELECTION)
-    ) {
-      PlaybackSession.commandForGeneration(loadGeneration, "set", "aid", state.aid.toString())
-      Log.d(TAG, "Restored audio track: ${state.aid} (user selection)")
-    }
 
     PlaybackSession.setPropertyDouble("sub-delay", subDelay)
     // The secondary track has its own delay property and is otherwise left on the startup
@@ -6572,27 +6617,43 @@ private suspend fun restorePlaybackPosition(state: PlaybackStateEntity?, loadGen
       positionRestoreOverride ?: scriptRestore ?: snapshotJump ?: AudiobookPlayback.positionForLoad(item, intent)
     val restoreSavedPosition = playerPreferences.savePositionOnQuit.get()
     val resumeMode = playerPreferences.resumePlaybackMode.get()
-    // Only Always Resume may use the fast load-local start option. Never starts at zero.
-    val initialPositionSeconds =
-      if (effectivePositionOverride != null) {
-        effectivePositionOverride.positionSeconds?.takeIf { it.isFinite() && it > 0.0 }
-      } else if (
-        restoreSavedPosition &&
-        resumeMode == ResumePlaybackMode.Always &&
-        !item.isDefinitelyAudioOnly()
-      ) {
-        resolvePlaybackState(item.stableId, legacyMediaIdentifier)
-          ?.lastPosition
-          ?.takeIf { it > 3 }
-          ?.toDouble()
-      } else {
-        null
-      }
-    ensureCurrentMediaRequest(requestGeneration)
     val ytdlpSource =
       sequenceOf(item.originalUri, item.playableUri)
         .firstOrNull(YtdlpManager::requiresYtdlp)
     val requiresYtdlp = ytdlpSource != null
+    val needsSavedResumePosition =
+      effectivePositionOverride == null && restoreSavedPosition &&
+        resumeMode == ResumePlaybackMode.Always && !item.isDefinitelyAudioOnly()
+    // Only query saved state before load when it can change startup behavior: resume position
+    // or a remembered yt-dlp manual format. Ordinary local playback keeps its fast path.
+    val savedStateForLoad =
+      if (item.audiobook == null &&
+        (needsSavedResumePosition ||
+          (requiresYtdlp && !MpvConfigOverridePolicy.isOwnedByMpvConf("ytdl-format")))
+      ) {
+        resolvePlaybackState(item.stableId, legacyMediaIdentifier)
+      } else {
+        null
+      }
+    val initialPositionSeconds =
+      if (effectivePositionOverride != null) {
+        effectivePositionOverride.positionSeconds?.takeIf { it.isFinite() && it > 0.0 }
+      } else if (needsSavedResumePosition) {
+        savedStateForLoad?.lastPosition?.takeIf { it > 3 }?.toDouble()
+      } else {
+        null
+      }
+    val savedAudioSelector =
+      AudioTrackSelectionCodec.decodeSelection(savedStateForLoad?.audioSelection)
+        ?.takeIf { it.mode == AudioSelectionMode.TRACK }
+        ?.track
+        ?.ytdlFormatSelector
+        ?.takeIf { it.isNotBlank() }
+    val effectiveYtdlFormat =
+      ytdlFormat ?: savedAudioSelector.takeIf {
+        requiresYtdlp && !MpvConfigOverridePolicy.isOwnedByMpvConf("ytdl-format")
+      }
+    ensureCurrentMediaRequest(requestGeneration)
     val ytdlpReady =
       if (ytdlpSource != null) {
         YtdlpManager.prepareForPlayback(this, ytdlpSource) { line ->
@@ -6635,8 +6696,8 @@ private suspend fun restorePlaybackPosition(state: PlaybackStateEntity?, loadGen
               } else {
                 // A null per-video override means "use the user-selected yt-dlp settings";
                 // don't erase the format already applied by setupYtdlpOptions().
-                if (requiresYtdlp && ytdlFormat != null) {
-                  PlaybackSession.setPropertyString("ytdl-format", ytdlFormat)
+                if (requiresYtdlp && effectiveYtdlFormat != null) {
+                  PlaybackSession.setPropertyString("ytdl-format", effectiveYtdlFormat)
                 }
                 nativeLoad()
               }
@@ -6662,7 +6723,7 @@ private suspend fun restorePlaybackPosition(state: PlaybackStateEntity?, loadGen
         attempt = attempt,
         requestGeneration = requestGeneration,
         legacyMediaIdentifier = legacyMediaIdentifier,
-        ytdlFormat = ytdlFormat,
+        ytdlFormat = effectiveYtdlFormat,
         positionRestoreOverride = effectivePositionOverride,
       )
     withContext(Dispatchers.Main) { armPlaybackLoadRecovery(request) }

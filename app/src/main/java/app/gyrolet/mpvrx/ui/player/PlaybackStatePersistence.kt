@@ -29,6 +29,10 @@ internal data class PlaybackStateSnapshot(
   val aid: Int,
   val audioDelayMs: Int,
   val externalSubtitles: String,
+  val audioSelection: String = "",
+  val audioSelectionResolved: Boolean = false,
+  val externalAudio: String = "",
+  val externalAudioResolved: Boolean = false,
   val isPositionRestorePending: Boolean = false,
   /** A live stream's position is a moment in a broadcast that will be gone on the next visit. */
   val isLive: Boolean = false,
@@ -69,6 +73,8 @@ internal object PlaybackStatePersistence {
       audioDelay = snapshot.audioDelayMs,
       timeRemaining = timeRemaining,
       externalSubtitles = snapshot.externalSubtitles,
+      audioSelection = if (snapshot.audioSelectionResolved) snapshot.audioSelection else oldState?.audioSelection.orEmpty(),
+      externalAudio = if (snapshot.externalAudioResolved) snapshot.externalAudio else oldState?.externalAudio.orEmpty(),
       hasBeenWatched =
         isWatched(
           oldState = oldState,

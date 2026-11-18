@@ -40,12 +40,19 @@ class TrackSelector(
     val hearing: Boolean,
     val external: Boolean,
     val image: Boolean,
+    val srcId: Long?,
+    val ffIndex: Long?,
+    val codec: String,
+    val channels: Long?,
+    val externalFilename: String,
+    val visualImpaired: Boolean,
   )
 
   suspend fun onFileLoaded(
     hasState: Boolean = false,
     expectedGeneration: Long = PlaybackSession.state.value.generation,
     savedSubtitlesOff: Boolean = false,
+    savedAudioSelection: String = "",
   ) = withContext(Dispatchers.IO) {
     var trackCount = 0
     for (attempt in 0 until 20) {
@@ -56,12 +63,19 @@ class TrackSelector(
     }
     if (trackCount == 0) return@withContext
     val tracks = readTracks(expectedGeneration) ?: return@withContext
-    if (tracks.none { it.type == "video" && !it.image }) return@withContext
+    // Audio-only media has no video track, but it still needs the same language and manual
+    // selection policy. Do not gate audio selection on the presence of a video stream.
+    val mediaId = PlaybackSession.state.value.currentItem?.stableId.orEmpty()
 
     if (!MpvConfigOverridePolicy.ownsAny(MpvConfigControlledFeatures.AUDIO_TRACK_SELECTION)) {
-      ensureAudioTrackSelected(tracks, hasState, expectedGeneration)
+      AudioTrackSelectionState.restoreSavedSelection(mediaId, expectedGeneration, savedAudioSelection)
+      ensureAudioTrackSelected(tracks, mediaId, expectedGeneration)
     }
-    if (!MpvConfigOverridePolicy.ownsAny(MpvConfigControlledFeatures.SUBTITLE_TRACK_SELECTION)) {
+    // Audio selection also runs for audio-only media, but subtitle autoselection retains
+    // its original video-only scope (music files can expose lyrics as subtitle-like tracks).
+    if (tracks.any { it.type == "video" && !it.image } &&
+      !MpvConfigOverridePolicy.ownsAny(MpvConfigControlledFeatures.SUBTITLE_TRACK_SELECTION)
+    ) {
       ensureSubtitleTrackSelected(tracks, hasState, expectedGeneration, savedSubtitlesOff)
     }
   }
@@ -74,6 +88,7 @@ class TrackSelector(
           val prefix = "track-list/$index"
           val id = reader.int("$prefix/id") ?: continue
           val type = reader.string("$prefix/type") ?: continue
+          val isAudio = type == "audio"
           add(
             Track(
               id = id,
@@ -85,30 +100,134 @@ class TrackSelector(
               hearing = reader.string("$prefix/hearing-impaired") == "yes",
               external = reader.string("$prefix/external") == "yes",
               image = reader.string("$prefix/image") == "yes",
+              // Identity metadata is only consumed by audio selection. Avoid extra mpv
+              // property reads for video and subtitle tracks on every media load.
+              srcId = if (isAudio) reader.string("$prefix/src-id")?.toLongOrNull() else null,
+              ffIndex = if (isAudio) reader.string("$prefix/ff-index")?.toLongOrNull() else null,
+              codec = if (isAudio) reader.string("$prefix/codec").orEmpty() else "",
+              channels =
+                if (isAudio) {
+                  reader.string("$prefix/demux-channel-count")?.toLongOrNull()
+                    ?: reader.string("$prefix/audio-channels")?.toLongOrNull()
+                } else {
+                  null
+                },
+              externalFilename = if (isAudio) reader.string("$prefix/external-filename").orEmpty() else "",
+              visualImpaired = isAudio && reader.string("$prefix/visual-impaired") == "yes",
             ),
           )
         }
       }
     }
 
-  private fun ensureAudioTrackSelected(tracks: List<Track>, hasState: Boolean, generation: Long) {
-    val current = getTrackSelectionId("aid")
+  private fun ensureAudioTrackSelected(
+    tracks: List<Track>,
+    mediaId: String,
+    generation: Long,
+  ) {
     val audioTracks = tracks.filter { it.type == "audio" }
-    val preferences = preferences(audioPreferences.preferredLanguages.get())
-    if (hasState && preferences.isEmpty() && audioTracks.any { it.id == current }) return
+    if (audioTracks.isEmpty()) return
 
-    val cleanTracks = audioTracks.filter { track -> ignoredAudioTitles.none { track.title.contains(it) } }
-    for (preference in preferences) {
-      val match = cleanTracks.mapNotNull { track -> matchRank(track, preference)?.let { track to it } }
-        .minByOrNull { it.second }?.first
-      if (match != null) {
-        selectTrack("aid", match.id, generation, "Preferred audio: $preference")
+    val current = getTrackSelectionId("aid")
+    val selection = AudioTrackSelectionState.selectionFor(mediaId, generation)
+      ?: PersistedAudioSelection.Automatic
+
+    when (selection.mode) {
+      AudioSelectionMode.OFF -> {
+        selectTrack("aid", 0, generation, "Manual audio disabled")
         return
       }
+      AudioSelectionMode.TRACK -> {
+        val identity = selection.track
+        if (identity != null) {
+          val matches = if (!identity.externalUri.isNullOrBlank()) {
+            // An external choice may only resolve to the exact re-attached external file.
+            // Never fall back to an embedded stream with similar language/title metadata.
+            audioTracks.asSequence()
+              .filter { it.external }
+              .filter { track ->
+                AudioTrackSelectionState.matchesExternalAudioPath(
+                  mediaId,
+                  generation,
+                  identity.externalUri,
+                  track.externalFilename,
+                )
+              }
+              .map { it to 10_000 }
+              .toList()
+          } else {
+            audioTracks.mapNotNull { track ->
+              identity.matchScore(track.identity())?.let { score -> track to score }
+            }
+          }
+          val bestScore = matches.maxOfOrNull { it.second }
+          val bestMatches = matches.filter { it.second == bestScore }
+          // Ambiguous metadata must not silently restore a different track. Fall back to AUTO.
+          val match = bestMatches.singleOrNull()
+          if (match != null) {
+            if (current != match.id) {
+              selectTrack("aid", match.id, generation, "Restored manual audio selection")
+            }
+            AudioTrackSelectionState.updateResolvedManualTrack(
+              mediaId,
+              generation,
+              match.identity().copy(externalUri = identity.externalUri),
+            )
+            return
+          }
+        }
+        Log.i(TAG, "Saved manual audio track is unavailable or ambiguous; using automatic selection")
+        AudioTrackSelectionState.clearManualSelection(mediaId, generation)
+      }
+      AudioSelectionMode.AUTO -> Unit
     }
-    if (audioTracks.any { it.id == current }) return
-    cleanTracks.firstOrNull()?.let { selectTrack("aid", it.id, generation, "Clean audio fallback") }
+
+    val cleanTracks = audioTracks.filter(::isCleanAudio)
+    // Prefer a clean stream, but don't leave a media item silent when the file only contains
+    // commentary/description tracks.
+    val candidates = cleanTracks.ifEmpty { audioTracks }
+    val preferredLanguages = preferences(audioPreferences.preferredLanguages.get())
+
+    // The preference list is ordered. A match for a later language must never prevent trying
+    // an earlier language, and defaults only break ties within the same preference/rank.
+    for (preference in preferredLanguages) {
+      val matches = candidates.mapNotNull { track ->
+        matchRank(track, preference)?.let { rank -> track to rank }
+      }
+      if (matches.isEmpty()) continue
+      val bestRank = matches.minOf { it.second }
+      val bestMatches = matches.filter { it.second == bestRank }.map { it.first }
+      val match = bestMatches.firstOrNull { it.id == current }
+        ?: bestMatches.firstOrNull { it.isDefault }
+        ?: bestMatches.first()
+      if (current != match.id) {
+        selectTrack("aid", match.id, generation, "Preferred audio: $preference")
+      }
+      return
+    }
+
+    // With no preference match, retain mpv's automatic choice when it is usable. Otherwise
+    // prefer a file-default stream, then the first available stream.
+    if (candidates.any { it.id == current }) return
+    val fallback = candidates.firstOrNull { it.isDefault } ?: candidates.firstOrNull()
+    if (fallback != null && current != fallback.id) {
+      selectTrack("aid", fallback.id, generation, "Audio default fallback")
+    }
   }
+
+  private fun isCleanAudio(track: Track): Boolean =
+    !track.visualImpaired && !ignoredAudioTitleRegex.containsMatchIn(track.title)
+
+  private fun Track.identity(): AudioTrackIdentity =
+    AudioTrackIdentity.fromLoadedTrack(
+      srcId = srcId,
+      ffIndex = ffIndex,
+      language = lang,
+      title = title,
+      codec = codec,
+      channels = channels,
+      externalFilename = externalFilename,
+    )
 
   private fun ensureSubtitleTrackSelected(
     tracks: List<Track>,
@@ -253,7 +372,7 @@ class TrackSelector(
 
   private companion object {
     const val TAG = "TrackSelector"
-    val ignoredAudioTitles = listOf("commentary", "description", "adh", "comment", "extra")
+    val ignoredAudioTitleRegex = Regex("""(?:^|[\s\p{Punct}])(commentary|description|audio description|visual impaired|descriptive|adh|comment|extra)(?:$|[\s\p{Punct}])""")
     val ignoredSubtitleTitles = listOf("signs", "songs", "lyrics", "forced", "sdh", "colored", "karaoke")
     val dialogueTitleKeywords = listOf(
       "subtitle", "dialogue", "dialog", "translation", "english", "main", "script", "full", "caption",
