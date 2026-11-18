@@ -250,6 +250,7 @@
       font-size: 10px; font-weight: 900; letter-spacing: .06em; text-transform: uppercase;
     }
     .channel-pill.preview { background: var(--violet-soft); color: var(--violet-deep); }
+    .channel-pill.experimental { background: #fdeeda; color: #96660a; }
 
     .ticket-version {
       margin: 26px 0 10px;
@@ -479,11 +480,12 @@
       <section class="hero-head">
         <div class="kicker reveal delay-1"><span class="live-dot" aria-hidden="true"></span>Live from GitHub</div>
         <h1 class="reveal delay-2">Every build,<br><em>right here.</em></h1>
-        <p class="lead reveal delay-3">Preview and stable APKs for mpvRx — signed, checksummed, and published straight from GitHub Actions and Releases.</p>
+        <p class="lead reveal delay-3">Preview, experimental and stable APKs for mpvRx — signed, checksummed, and published straight from GitHub Actions and Releases.</p>
 
         <div class="tabs reveal delay-3" role="tablist" aria-label="Release channel">
           <button class="tab-btn" id="tab-btn-preview" role="tab" type="button" aria-selected="false" aria-controls="panel-preview">Preview build</button>
           <button class="tab-btn" id="tab-btn-release" role="tab" type="button" aria-selected="false" aria-controls="panel-release">Stable release</button>
+          <button class="tab-btn" id="tab-btn-experimental" role="tab" type="button" aria-selected="false" aria-controls="panel-experimental">Experimental build</button>
         </div>
       </section>
 
@@ -613,6 +615,53 @@
             <span class="seal" aria-hidden="true">✓</span>
             <div><strong>Build provenance included</strong><p>Each card reports the published file size and exact SHA-256 digest from the workflow manifest.</p></div>
             <code>latest.json</code>
+          </aside>
+        </section>
+      </div>
+
+      <!-- EXPERIMENTAL PANEL -->
+      <div class="panel" id="panel-experimental" role="tabpanel" aria-labelledby="tab-btn-experimental">
+        <div class="ticket">
+          <div class="ticket-head">
+            <span class="ticket-label">Current experimental</span>
+            <span class="channel-pill experimental">Experimental</span>
+          </div>
+          <div class="ticket-version loading" id="exp-build">r—</div>
+          <p class="ticket-sub">Built and signed automatically from the fongmi-fixes branch, with the Dolby Vision sink fix.</p>
+          <div class="ticket-meta">
+            <div><span>Commit</span><strong id="exp-commit">—</strong></div>
+            <div><span>Actions run</span><strong id="exp-run">—</strong></div>
+            <div><span>Published</span><strong id="exp-published">—</strong></div>
+            <div><span>Flavor set</span><strong id="exp-flavor">—</strong></div>
+          </div>
+          <div class="ticket-actions">
+            <a class="button primary" id="exp-cta" href="#exp-downloads">Choose a build ↓</a>
+            <a class="button secondary" href="https://github.com/fzs209/mpvRx" target="_blank" rel="noreferrer">View on GitHub ↗</a>
+          </div>
+        </div>
+
+        <div class="warning-strip" role="note">
+          <strong>Experimental channel</strong>
+          <p>These builds track the fongmi-fixes branch and update through the in-app experimental channel. They may be unstable.</p>
+        </div>
+
+        <section class="block" id="exp-downloads">
+          <div class="section-head">
+            <div>
+              <span class="section-index">📦 Download assets</span>
+              <h2>Pick the build that fits.</h2>
+            </div>
+            <p>The patched Fongmi build for arm64-v8a devices, published as a GitHub release.</p>
+          </div>
+
+          <div class="downloads" id="exp-download-grid" aria-live="polite" aria-busy="true">
+            <div class="loading-card" aria-hidden="true"></div>
+          </div>
+
+          <aside class="provenance">
+            <span class="seal" aria-hidden="true">✓</span>
+            <div><strong>Build provenance included</strong><p>Each card reports the published file size and exact SHA-256 digest from the workflow manifest.</p></div>
+            <code>experimental.json</code>
           </aside>
         </section>
       </div>
@@ -769,8 +818,10 @@
     function setActiveTab(which) {
       document.getElementById("tab-btn-release").setAttribute("aria-selected", which === "release" ? "true" : "false");
       document.getElementById("tab-btn-preview").setAttribute("aria-selected", which === "preview" ? "true" : "false");
+      document.getElementById("tab-btn-experimental").setAttribute("aria-selected", which === "experimental" ? "true" : "false");
       document.getElementById("panel-release").classList.toggle("active", which === "release");
       document.getElementById("panel-preview").classList.toggle("active", which === "preview");
+      document.getElementById("panel-experimental").classList.toggle("active", which === "experimental");
     }
     document.getElementById("tab-btn-release").addEventListener("click", () => {
       history.replaceState(null, "", "#release");
@@ -779,6 +830,10 @@
     document.getElementById("tab-btn-preview").addEventListener("click", () => {
       history.replaceState(null, "", "#preview");
       setActiveTab("preview");
+    });
+    document.getElementById("tab-btn-experimental").addEventListener("click", () => {
+      history.replaceState(null, "", "#experimental");
+      setActiveTab("experimental");
     });
     document.getElementById("nav-release-link").addEventListener("click", event => {
       event.preventDefault();
@@ -789,20 +844,24 @@
 
     let releasePublished = null;
     let previewPublished = null;
+    let experimentalPublished = null;
     let latestReleaseAsset = null;
     let latestPreviewAsset = null;
     let releaseSettled = false;
     let previewSettled = false;
+    let experimentalSettled = false;
     let tabRevealed = false;
 
     function decideDefaultTab() {
       // Wait until both channels have finished loading (success or failure) so we
       // pick the right tab once, instead of flashing an interim guess.
-      if (!releaseSettled || !previewSettled) return;
+      if (!releaseSettled || !previewSettled || !experimentalSettled) return;
       if (tabRevealed) return;
       tabRevealed = true;
 
-      if (location.hash === "#preview" && previewPublished) {
+      if (location.hash === "#experimental" && experimentalPublished) {
+        setActiveTab("experimental");
+      } else if (location.hash === "#preview" && previewPublished) {
         setActiveTab("preview");
       } else if (location.hash === "#release") {
         setActiveTab("release");
@@ -820,6 +879,7 @@
     window.setTimeout(() => {
       releaseSettled = true;
       previewSettled = true;
+      experimentalSettled = true;
       decideDefaultTab();
     }, 3500);
 
@@ -960,6 +1020,51 @@
         grid.innerHTML = '<div class="empty-note">No preview build available right now.</div>';
         grid.setAttribute("aria-busy", "false");
         previewSettled = true;
+        decideDefaultTab();
+      });
+
+    // --- Experimental channel ---
+    fetch("./experimental.json", { cache: "no-store" })
+      .then(r => { if (!r.ok) throw new Error("no manifest"); return r.json(); })
+      .then(manifest => {
+        experimentalPublished = manifest.published_at;
+        const build = document.getElementById("exp-build");
+        build.textContent = `r${manifest.commit_count}`;
+        build.classList.remove("loading");
+        document.getElementById("exp-commit").textContent = (manifest.commit_sha || "").slice(0, 7) || "Unknown";
+        document.getElementById("exp-published").textContent = fmtDate(manifest.published_at);
+        document.getElementById("exp-flavor").textContent = "Fongmi";
+
+        const run = document.getElementById("exp-run");
+        if (manifest.run_url) {
+          const link = document.createElement("a");
+          link.href = manifest.run_url; link.target = "_blank"; link.rel = "noreferrer";
+          link.textContent = `#${manifest.run_url.split("/").pop()}`;
+          run.replaceChildren(link);
+        } else {
+          run.textContent = "—";
+        }
+
+        const assets = (manifest.assets || [])
+          .map(a => ({ name: a.name, size: a.size, browser_download_url: a.browser_download_url, download_count: undefined, sha256: a.sha256 }));
+        const checksums = {};
+        assets.forEach(a => { if (a.sha256) checksums[a.name] = a.sha256; });
+        const grid = document.getElementById("exp-download-grid");
+        grid.replaceChildren(...assets.map((a, i) => createDownloadCard(a, i, checksums)));
+        grid.setAttribute("aria-busy", "false");
+
+        if (assets.length) document.getElementById("exp-cta").href = assets[0].browser_download_url;
+
+        experimentalSettled = true;
+        decideDefaultTab();
+      })
+      .catch(() => {
+        document.getElementById("exp-build").textContent = "Offline";
+        document.getElementById("exp-build").classList.remove("loading");
+        const grid = document.getElementById("exp-download-grid");
+        grid.innerHTML = '<div class="empty-note">No experimental build available right now.</div>';
+        grid.setAttribute("aria-busy", "false");
+        experimentalSettled = true;
         decideDefaultTab();
       });
   </script>
