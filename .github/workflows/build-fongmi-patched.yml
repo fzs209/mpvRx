@@ -284,7 +284,14 @@ jobs:
           unset ANDROID_SDK_ROOT
 
           ./buildall.sh --arch arm64 -n mpv
-          ./buildall.sh -n mpv-android
+          # The packaging step must be told arm64 as well: without --arch it
+          # defaults to armv7l, and the step that writes the component
+          # versions into the AAR then looks for mpv's generated version
+          # file under the armv7l build folder, which this arm64-only build
+          # never creates. It misses, its tag lookup on the shallow clone
+          # fails too, and the reported mpv version falls back to a plain
+          # "0.42.0" with the commit and -dirty suffix lost.
+          ./buildall.sh --arch arm64 -n mpv-android
 
       - name: Stage patched AAR as local ivy release
         shell: bash
