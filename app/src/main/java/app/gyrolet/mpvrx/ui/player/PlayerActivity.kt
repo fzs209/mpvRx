@@ -315,6 +315,8 @@ class PlayerActivity :
 
   override fun currentThumbnailSource(): String? = currentPlayableUri
 
+  override suspend fun captureVideoFrame(maxDimension: Int): Bitmap? = player.captureVideoFrame(maxDimension)
+
   override fun isCurrentMediaKnownAudio(): Boolean {
     val extension =
       sequenceOf(fileName, currentPlayableUri)

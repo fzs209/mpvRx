@@ -10,6 +10,7 @@
 package app.gyrolet.mpvrx.domain.autocrop
 
 import android.graphics.Bitmap
+import kotlin.math.abs
 import kotlin.math.max
 
 /** Edge widths expressed as fractions of the decoded frame size. */
@@ -33,6 +34,7 @@ object AutoCropAnalyzer {
   private const val MIN_CONTENT_PIXEL_RATIO = 0.035f
   private const val MAX_EDGE_FRACTION = 0.32f
   private const val MIN_EDGE_FRACTION = 0.008f
+  private const val SYMMETRY_TOLERANCE = 0.012f
   private const val BOUNDARY_OVERLAP_PIXELS = 1
 
   fun analyzeFrame(bitmap: Bitmap): AutoCropEdges? {
@@ -84,6 +86,22 @@ object AutoCropAnalyzer {
 
     if (result.left + result.right > MAX_EDGE_FRACTION) return null
     if (result.top + result.bottom > MAX_EDGE_FRACTION) return null
+    return result.takeIf { it.left > 0f || it.top > 0f || it.right > 0f || it.bottom > 0f }
+  }
+
+  /** Bars are centred, so opposite edges that disagree (a subtitle hid part of one) keep only their overlap. */
+  fun centered(edges: AutoCropEdges): AutoCropEdges? {
+    val horizontal = minOf(edges.left, edges.right)
+    val vertical = minOf(edges.top, edges.bottom)
+    val keepHorizontal = abs(edges.left - edges.right) <= SYMMETRY_TOLERANCE
+    val keepVertical = abs(edges.top - edges.bottom) <= SYMMETRY_TOLERANCE
+    val result =
+      AutoCropEdges(
+        left = if (keepHorizontal) edges.left else horizontal,
+        top = if (keepVertical) edges.top else vertical,
+        right = if (keepHorizontal) edges.right else horizontal,
+        bottom = if (keepVertical) edges.bottom else vertical,
+      )
     return result.takeIf { it.left > 0f || it.top > 0f || it.right > 0f || it.bottom > 0f }
   }
 

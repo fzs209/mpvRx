@@ -5,10 +5,14 @@
 package app.gyrolet.mpvrx.ui.player
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.graphics.PixelFormat
 import android.graphics.Rect
 import android.graphics.SurfaceTexture
+import android.os.Handler
+import android.os.Looper
 import android.util.AttributeSet
+import android.view.PixelCopy
 import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
@@ -34,8 +38,13 @@ import app.gyrolet.mpvrx.preferences.MpvConfigOverridePolicy
 import com.kyant.backdrop.backdrops.LayerBackdrop
 import com.kyant.backdrop.backdrops.layerBackdrop
 import com.kyant.backdrop.backdrops.rememberLayerBackdrop
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
+import kotlin.coroutines.resume
+import kotlin.math.roundToInt
 
 /**
  * HDR stays on a native SurfaceView: Android tone-maps TextureView content into the app window's
@@ -107,6 +116,7 @@ abstract class MpvSurfaceHost(context: Context, attributes: AttributeSet) : Fram
     private set
   private var videoView: View? = null
   private var videoRect: MpvVideoRect? = null
+  private val pixelCopyHandler = Handler(Looper.getMainLooper())
 
   // The new TextureView can be attached to mpv before it receives a drawable video frame.
   // Expose its first real buffer update so the controls never sample a blank HDR/SDR layer.
@@ -144,6 +154,77 @@ abstract class MpvSurfaceHost(context: Context, attributes: AttributeSet) : Fram
     videoRect = rect
     requestLayout()
   }
+
+  /** Copies the picture on the video Surface without touching mpv; null while no whole picture is shown. */
+  internal suspend fun captureVideoFrame(maxDimension: Int): Bitmap? {
+    // Native reads stay off the main thread, where waiting for the session lock would stall the UI.
+    val (rendering, picture) =
+      withContext(Dispatchers.Default) {
+        val rendering = PlaybackSession.isRendererReadyFor(this@MpvSurfaceHost)
+        Pair(rendering, if (rendering) renderedPictureRect() else null)
+      }
+    if (!rendering) return null
+    // The copy runs on the main thread so the Surface cannot be released between check and copy.
+    return withContext(Dispatchers.Main.immediate) {
+      val surface = renderSurface?.takeIf(Surface::isValid) ?: return@withContext null
+      val view = videoView?.takeIf { it.width > 0 && it.height > 0 } ?: return@withContext null
+      // Direct MediaCodec output stretches each whole frame over its own Surface.
+      val source =
+        if (videoRect != null) {
+          null
+        } else {
+          picture
+            ?.takeIf { it.viewportWidth == view.width && it.viewportHeight == view.height }
+            ?.let { Rect(it.left, it.top, it.right, it.bottom) }
+            ?: return@withContext null
+        }
+      val frameWidth = source?.width() ?: view.width
+      val frameHeight = source?.height() ?: view.height
+      val scale = minOf(1f, maxDimension.toFloat() / maxOf(frameWidth, frameHeight))
+      val bitmap =
+        Bitmap.createBitmap(
+          (frameWidth * scale).roundToInt().coerceAtLeast(1),
+          (frameHeight * scale).roundToInt().coerceAtLeast(1),
+          Bitmap.Config.ARGB_8888,
+        )
+      if (copySurfacePixels(surface, source, bitmap)) {
+        bitmap
+      } else {
+        bitmap.recycle()
+        null
+      }
+    }
+  }
+
+  /** mpv's last drawn picture rectangle, or null once zoom or pan push part of it off the Surface. */
+  private fun renderedPictureRect(): MpvVideoRect? {
+    fun dimension(key: String) = PlaybackSession.getPropertyInt("osd-dimensions/$key")
+    val viewportWidth = dimension("w") ?: return null
+    val viewportHeight = dimension("h") ?: return null
+    val left = dimension("ml") ?: return null
+    val top = dimension("mt") ?: return null
+    val right = viewportWidth - (dimension("mr") ?: return null)
+    val bottom = viewportHeight - (dimension("mb") ?: return null)
+    if (left < 0 || top < 0 || right > viewportWidth || bottom > viewportHeight || right <= left || bottom <= top) {
+      return null
+    }
+    return MpvVideoRect(viewportWidth, viewportHeight, left, top, right, bottom)
+  }
+
+  private suspend fun copySurfacePixels(surface: Surface, source: Rect?, destination: Bitmap): Boolean =
+    suspendCancellableCoroutine { continuation ->
+      try {
+        PixelCopy.request(
+          surface,
+          source,
+          destination,
+          { result -> if (continuation.isActive) continuation.resume(result == PixelCopy.SUCCESS) },
+          pixelCopyHandler,
+        )
+      } catch (_: IllegalArgumentException) {
+        if (continuation.isActive) continuation.resume(false)
+      }
+    }
 
   // mpv's viewport stays the whole player while the video view itself is moved and resized.
   private fun reportedSize(surfaceWidth: Int, surfaceHeight: Int): Pair<Int, Int> =
