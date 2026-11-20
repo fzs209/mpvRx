@@ -5720,6 +5720,8 @@ class PlayerActivity :
     }
 
     return runCatching {
+      ExternalAudioDiscovery.autoload(this@PlayerActivity, loadGeneration)
+      if (!PlaybackSession.isCurrentGeneration(loadGeneration)) return@runCatching LoadedPlaybackState()
       val state = resolvePlaybackState(identifier, legacyIdentifier)
 
       if (!PlaybackSession.isCurrentGeneration(loadGeneration)) return@runCatching LoadedPlaybackState()
