@@ -964,13 +964,6 @@ class MPVView(
     return buildList {
       add("slang" to preferredSubtitleLanguages)
       add("sub-auto" to "no")
-      // mpv only skips its per-load directory scan for external files when sub-auto,
-      // audio-file-auto AND cover-art-auto are all "no"; cover-art-auto defaults to
-      // "exact", so without these two the scan still enumerates the whole folder on
-      // every open (seconds in large folders such as DCIM/Camera). External subtitles
-      // are unaffected: the app discovers those itself (SubtitleDiscovery).
-      add("audio-file-auto" to "no")
-      add("cover-art-auto" to "no")
       add("sub-file-paths" to "")
       add("subs-fallback" to "no")
 
