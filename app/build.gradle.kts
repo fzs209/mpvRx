@@ -376,6 +376,11 @@ androidComponents {
 kotlin {
   compilerOptions {
     freeCompilerArgs.addAll(
+      // Kotlin 2.5 enables the unused-return-value checker, which reports every
+      // discarded runCatching result (200+ sites across upstream code that uses
+      // runCatching purely for exception swallowing). Patching each call site is
+      // not viable on a fork that syncs upstream daily, so the checker is off.
+      "-Xreturn-value-checker=disable",
       "-opt-in=com.google.accompanist.permissions.ExperimentalPermissionsApi",
       "-opt-in=androidx.compose.material3.ExperimentalMaterial3Api",
       "-opt-in=androidx.compose.material3.ExperimentalMaterial3ExpressiveApi",
