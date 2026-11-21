@@ -105,6 +105,7 @@ enum class MpvConfigOverride(
         "video-pan-x",
         "video-pan-y",
         "video-aspect-override",
+        "video-crop",
         "panscan",
       ),
   ),
@@ -308,8 +309,6 @@ object MpvConfigControlledFeatures {
   val VIDEO_ZOOM = setOf("video-zoom")
 
   val VIDEO_ASPECT = setOf("video-aspect-override", "panscan")
-
-  val AUTO_CROP = setOf("video-crop")
 
   val HARDWARE_DECODER = setOf("hwdec", "gpu-api", "gpu-context")
 }

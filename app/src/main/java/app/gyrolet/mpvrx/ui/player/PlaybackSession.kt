@@ -231,7 +231,7 @@ object PlaybackSession : MPVLib.EventObserver {
   private var sessionBatteryGeneration = 0L
   private var sessionBatteryBaseline: SessionBatteryReading? = null
   private var sessionBatteryBaselineJob: Job? = null
-  internal val scrollableStatisticsPages = setOf(2, 4, 5, 6, 7, 8)
+  internal val scrollableStatisticsPages = setOf(2, 4, 5, 7, 8, 9)
   private val statisticsStateLock = Any()
   private var statisticsRevision = 0L
   private var statisticsSelectionRequested = false
@@ -316,6 +316,7 @@ object PlaybackSession : MPVLib.EventObserver {
   private val _videoZoom = MutableStateFlow(0f)
   private val _videoPanX = MutableStateFlow(0f)
   private val _videoPanY = MutableStateFlow(0f)
+  private var appliedBlackBarCrop: Pair<BlackBarSource, String>? = null
   private val streamSequence = AtomicLong()
   private val observedProperties = mutableSetOf<Pair<String, Int>>()
   private val playbackTransitionAudioGuardHandler = Handler(Looper.getMainLooper())
@@ -402,6 +403,7 @@ object PlaybackSession : MPVLib.EventObserver {
   private var ambientVideoTransform: MutableMap<String, Double>? = null
   @Volatile var isAmbientShaderActive: Boolean = false
     private set
+  private var youTubeAmbientSubtitleMargins: Pair<Long, String>? = null
   private val ambientTransformProperties = setOf("video-zoom", "video-pan-x", "video-pan-y")
   private var streamingOptionsApplied = false
   private var appliedUserAgent: String? = null
@@ -1797,9 +1799,9 @@ internal fun userScriptsNeedReload(currentKey: String): Boolean {
 
   fun commandNode(vararg command: String): MPVNode? = withCore(null) { MPVLib.commandNode(*command) }
 
-  /** 0 = Off, 1..6 = stats.lua pages, 7 = Console, 8 = mpv's keyboard-only page 0. */
+  /** 0 = Off, 1..7 = stats.lua pages, 8 = Console, 9 = mpv's keyboard-only page 0. */
   fun setStatisticsPage(page: Int) {
-    require(page in 0..8) { "Invalid statistics page: $page" }
+    require(page in 0..9) { "Invalid statistics page: $page" }
     val revision =
       synchronized(statisticsStateLock) {
         statisticsSelectionRequested = true
@@ -1820,8 +1822,8 @@ internal fun userScriptsNeedReload(currentKey: String): Boolean {
   fun restoreStatisticsPage() = synchronized(statisticsStateLock) {
     if (!statisticsSelectionRequested) {
       val saved = advancedPreferences.enabledStatisticsPage.get()
-      if (saved !in 0..8) Log.w(TAG, "Discarding invalid saved statistics page: $saved")
-      setStatisticsPage(if (saved in 1..6 || saved == 8) saved else 0)
+      if (saved !in 0..9) Log.w(TAG, "Discarding invalid saved statistics page: $saved")
+      setStatisticsPage(if (saved in 1..7 || saved == 9) saved else 0)
     }
   }
 
@@ -1875,7 +1877,7 @@ internal fun userScriptsNeedReload(currentKey: String): Boolean {
     val parts = value.split(':', limit = 2)
     val revision = parts.getOrNull(0)?.toLongOrNull()
     val page = parts.getOrNull(1)?.toIntOrNull()
-    if (revision == null || page == null || page !in 0..8) {
+    if (revision == null || page == null || page !in 0..9) {
       Log.w(TAG, "Invalid statistics state from mpv: $value")
       return
     }
@@ -1902,7 +1904,7 @@ internal fun userScriptsNeedReload(currentKey: String): Boolean {
   }
 
   private fun updateStatisticsDiagnostics(page: Int) {
-    if (page != 6) {
+    if (page != 7) {
       statisticsDiagnosticsJob?.cancel()
       statisticsDiagnosticsJob = null
     } else if (statisticsDiagnosticsJob?.isActive != true) {
@@ -1910,13 +1912,13 @@ internal fun userScriptsNeedReload(currentKey: String): Boolean {
       val core = nativeObserver
       statisticsDiagnosticsJob = statisticsDiagnostics.launch {
         val diagnostics = StatisticsDiagnostics(context, playerPreferences, decoderPreferences)
-        while (isActive && _visibleStatisticsPage.value == 6 && advancedPreferences.enabledStatisticsPage.get() == 6) {
+        while (isActive && _visibleStatisticsPage.value == 7 && advancedPreferences.enabledStatisticsPage.get() == 7) {
           val state = _state.value
           val sample = diagnostics.sample(state).toString()
           withReadyCore(Unit) {
             if (isActive && nativeObserver === core && _state.value.generation == state.generation &&
-              _visibleStatisticsPage.value == 6 &&
-              advancedPreferences.enabledStatisticsPage.get() == 6
+              _visibleStatisticsPage.value == 7 &&
+              advancedPreferences.enabledStatisticsPage.get() == 7
             ) {
               MPVLib.setPropertyString(STATISTICS_ANDROID_PROPERTY, sample)
             }
@@ -2464,6 +2466,10 @@ internal fun userScriptsNeedReload(currentKey: String): Boolean {
       val spatialLabel = spatialFilter?.substringBefore(':')
       val valueWithSpatial = when {
         property == "blend-subtitles" && isAmbientShaderActive -> "no"
+        property == "sub-use-margins" && youTubeAmbientSubtitleMargins != null -> {
+          youTubeAmbientSubtitleMargins = youTubeAmbientSubtitleMargins?.first?.let { it to value }
+          "no"
+        }
         spatialFilter != null && !value.contains("$spatialLabel:") ->
           listOf(value, spatialFilter).filter { it.isNotBlank() }.joinToString(",")
         else -> value
@@ -2486,6 +2492,64 @@ internal fun userScriptsNeedReload(currentKey: String): Boolean {
   }
 
   fun grabThumbnail(dimension: Int): Bitmap? = withCore(null) { MPVLib.grabThumbnail(dimension) }
+
+  private fun matchesBlackBarSourceLocked(source: BlackBarSource): Boolean {
+    val current = _state.value
+    return loadedGeneration == source.generation && current.generation == source.generation &&
+      MPVLib.getPropertyString("vid")?.toIntOrNull() == source.trackId &&
+      MPVLib.getPropertyInt("video-out-params/w") == source.width &&
+      MPVLib.getPropertyInt("video-out-params/h") == source.height &&
+      (MPVLib.getPropertyInt("video-out-params/rotate") ?: 0) == source.rotation
+  }
+
+  internal fun captureBlackBarFrame(
+    source: BlackBarSource,
+    destination: File,
+    previousPosition: Double?,
+  ): Double? = withCore(null) {
+    if (!matchesBlackBarSourceLocked(source) || !_state.value.surfaceAttached || _state.value.paused ||
+      activeAmbientShaderPaths.isNotEmpty() ||
+      MPVLib.getPropertyBoolean("seeking") == true || MPVLib.getPropertyBoolean("paused-for-cache") == true ||
+      !MPVLib.getPropertyString("video-crop").isNullOrEmpty()
+    ) return@withCore null
+
+    // A container-cropped screenshot cannot be mapped onto the complete source frame.
+    if ((MPVLib.getPropertyInt("video-out-params/crop-w") ?: source.width) in 1 until source.width ||
+      (MPVLib.getPropertyInt("video-out-params/crop-h") ?: source.height) in 1 until source.height
+    ) return@withCore null
+    val position = MPVLib.getPropertyDouble("time-pos") ?: return@withCore null
+    if (previousPosition != null && kotlin.math.abs(position - previousPosition) < 0.05) return@withCore null
+
+    // grabThumbnail center-crops to a square. Request the whole video frame, without OSD or subtitles.
+    MPVLib.commandNode("screenshot-to-file", destination.absolutePath, "video") ?: return@withCore null
+    position
+  }
+
+  internal fun applyBlackBarCrop(source: BlackBarSource, bars: VideoBlackBars) = withCore(Unit) {
+    if (bars.isEmpty || !matchesBlackBarSourceLocked(source) ||
+      MpvConfigOverridePolicy.isOwnedByMpvConf("video-crop") ||
+      !MPVLib.getPropertyString("video-crop").isNullOrEmpty()
+    ) return@withCore
+    val geometry = bars.cropGeometry(source)
+    MPVLib.setPropertyString("file-local-options/video-crop", geometry)
+    if (MPVLib.getPropertyString("video-crop") == geometry) {
+      appliedBlackBarCrop = source to geometry
+    } else {
+      Log.w(TAG, "mpv did not apply black bar crop $geometry")
+    }
+  }
+
+  internal fun clearBlackBarCrop(unlessSource: BlackBarSource? = null) = withCore(Unit) {
+    val (source, geometry) = appliedBlackBarCrop ?: return@withCore
+    if (source == unlessSource) return@withCore
+    appliedBlackBarCrop = null
+    // mpv resets file-local options when the file ends. Never clear another script's crop.
+    if (loadedGeneration == source.generation && _state.value.generation == source.generation &&
+      MPVLib.getPropertyString("video-crop") == geometry
+    ) {
+      MPVLib.setPropertyString("file-local-options/video-crop", "")
+    }
+  }
 
   fun grabThumbnailFast(
     path: String,
@@ -2941,6 +3005,21 @@ internal fun userScriptsNeedReload(currentKey: String): Boolean {
     }
   }
 
+  internal fun keepYouTubeAmbientSubtitlesInsidePicture(owner: Long, active: Boolean) = withCore(Unit) {
+    val saved = youTubeAmbientSubtitleMargins
+    if (active) {
+      if (MpvConfigOverridePolicy.isOwnedByMpvConf("sub-use-margins")) return@withCore
+      val original = saved?.second ?: MPVLib.getPropertyString("sub-use-margins") ?: return@withCore
+      youTubeAmbientSubtitleMargins = owner to original
+      if (saved == null && original != "no") MPVLib.setPropertyString("sub-use-margins", "no")
+    } else if (saved != null && saved.first == owner) {
+      youTubeAmbientSubtitleMargins = null
+      if (MPVLib.getPropertyString("sub-use-margins") == "no" && saved.second != "no") {
+        MPVLib.setPropertyString("sub-use-margins", saved.second)
+      }
+    }
+  }
+
   /** Read one coherent geometry snapshot; never guess a 16:9 frame during a file transition. */
   internal fun ambientGeometry(): AmbientGeometry? = withReadyCore(null) {
     if ((MPVLib.getPropertyInt("video-params/w") ?: 0) <= 0) return@withReadyCore null
@@ -3086,6 +3165,7 @@ internal fun userScriptsNeedReload(currentKey: String): Boolean {
   }
 
   private fun resetAmbientShaderTrackingLocked() {
+    youTubeAmbientSubtitleMargins = null
     ambientVideoTransform = null
     isAmbientShaderActive = false
     activeAmbientShaderPaths.clear()

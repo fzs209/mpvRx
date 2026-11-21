@@ -9,10 +9,14 @@
 
 package app.gyrolet.mpvrx.ui.player.controls
 
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.provider.DocumentsContract
 import app.gyrolet.mpvrx.ui.components.AppToast as Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.ActivityResultLauncher
+import androidx.activity.result.contract.ActivityResultContract
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -34,6 +38,7 @@ import app.gyrolet.mpvrx.preferences.AdvancedPreferences
 import app.gyrolet.mpvrx.preferences.MpvConfigControlledFeatures
 import app.gyrolet.mpvrx.preferences.MpvConfigOverride
 import app.gyrolet.mpvrx.preferences.preference.collectAsState
+import app.gyrolet.mpvrx.ui.browser.dialogs.subtitlePickerExtensions
 import app.gyrolet.mpvrx.ui.player.Decoder
 import app.gyrolet.mpvrx.ui.player.Panels
 import app.gyrolet.mpvrx.ui.player.PlayerViewModel
@@ -60,13 +65,18 @@ import app.gyrolet.mpvrx.ui.player.controls.components.sheets.VideoZoomSheet
 import app.gyrolet.mpvrx.ui.player.controls.components.sheets.VideoQualitySheet
 import app.gyrolet.mpvrx.ui.player.controls.components.sheets.VisualizerStyleSheet
 import app.gyrolet.mpvrx.ui.player.setTrackSelectionId
-import app.gyrolet.mpvrx.ui.tv.launchOrInApp
+import app.gyrolet.mpvrx.ui.tv.TvDocumentUris
+import app.gyrolet.mpvrx.ui.tv.TvPickerActivity
 import app.gyrolet.mpvrx.utils.device.DeviceFormFactor
 import dev.vivvvek.seeker.Segment
+import java.io.File
+import java.io.IOException
 import kotlinx.collections.immutable.ImmutableList
 import kotlinx.collections.immutable.toImmutableList
 import org.koin.compose.koinInject
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import androidx.compose.runtime.collectAsState as composeCollectAsState
 
 @Composable
@@ -135,13 +145,9 @@ fun PlayerSheets(
       sheetShown, viewModel::sleepAtCurrentChapterEnd, onDismissRequest,
     )
     Sheets.SubtitleTracks -> {
-      val subtitlesPicker =
-        rememberLauncherForActivityResult(
-          ActivityResultContracts.OpenDocument(),
-        ) {
-          if (it == null) return@rememberLauncherForActivityResult
-          onAddSubtitle(it)
-        }
+      val subtitlesPreferences = koinInject<app.gyrolet.mpvrx.preferences.SubtitlesPreferences>()
+      val savedPickerPath = subtitlesPreferences.pickerPath.get()
+      val subtitlesPicker = rememberTrackFilePicker(onAddSubtitle) { subtitlesPreferences.pickerPath.set(it) }
       val subtitleMimeTypes =
         arrayOf(
           "text/plain",
@@ -152,10 +158,7 @@ fun PlayerSheets(
           "text/x-ssa",
           "*/*",
         )
-      val openSystemSubtitlePicker = { subtitlesPicker.launch(subtitleMimeTypes) }
-
-      val subtitlesPreferences = koinInject<app.gyrolet.mpvrx.preferences.SubtitlesPreferences>()
-      val savedPickerPath = subtitlesPreferences.pickerPath.get()
+      val openSystemSubtitlePicker = { subtitlesPicker.launch(TrackFileRequest(subtitleMimeTypes)) }
 
       val currentMediaTitle = viewModel.currentMediaTitle
       val matchToName =
@@ -222,9 +225,12 @@ fun PlayerSheets(
         isSubtitleSelected = isSubtitleSelected,
         subtitleSelectionIndicator = subtitleSelectionIndicator,
         onAddSubtitle = {
-          val inAppAvailable = !app.gyrolet.mpvrx.BuildConfig.SCOPED_STORAGE_ONLY
-          subtitlesPicker.launchOrInApp(context, subtitleMimeTypes, isTelevision, inAppAvailable) {
-            showFilePicker = true
+          when {
+            isTelevision -> subtitlesPicker.launch(
+              TrackFileRequest(subtitleMimeTypes, subtitlePickerExtensions, savedPickerPath, matchToName),
+            )
+            app.gyrolet.mpvrx.BuildConfig.SCOPED_STORAGE_ONLY -> openSystemSubtitlePicker()
+            else -> showFilePicker = true
           }
         },
         onRemoveSubtitle = onRemoveSubtitle,
@@ -311,16 +317,9 @@ fun PlayerSheets(
     }
 
     Sheets.AudioTracks -> {
-      val audioPicker =
-        rememberLauncherForActivityResult(
-          ActivityResultContracts.OpenDocument(),
-        ) {
-          if (it == null) return@rememberLauncherForActivityResult
-          onAddAudio(it)
-        }
-
       val audioPreferences = koinInject<app.gyrolet.mpvrx.preferences.AudioPreferences>()
       val savedPickerPath = audioPreferences.pickerPath.get()
+      val audioPicker = rememberTrackFilePicker(onAddAudio) { audioPreferences.pickerPath.set(it) }
       val audioMimeTypes =
         arrayOf(
           "audio/*",
@@ -330,7 +329,7 @@ fun PlayerSheets(
           "video/*",
           "*/*",
         )
-      val openSystemAudioPicker = { audioPicker.launch(audioMimeTypes) }
+      val openSystemAudioPicker = { audioPicker.launch(TrackFileRequest(audioMimeTypes)) }
 
       val currentMediaTitle = viewModel.currentMediaTitle
       val matchToName =
@@ -395,9 +394,12 @@ fun PlayerSheets(
           if (isTelevision) onDismissRequest()
         },
         onAddAudioTrack = {
-          val inAppAvailable = !app.gyrolet.mpvrx.BuildConfig.SCOPED_STORAGE_ONLY
-          audioPicker.launchOrInApp(context, audioMimeTypes, isTelevision, inAppAvailable) {
-            showAudioFilePicker = true
+          when {
+            isTelevision -> audioPicker.launch(
+              TrackFileRequest(audioMimeTypes, audioAllowedExtensions, savedPickerPath, matchToName),
+            )
+            app.gyrolet.mpvrx.BuildConfig.SCOPED_STORAGE_ONLY -> openSystemAudioPicker()
+            else -> showAudioFilePicker = true
           }
         },
         onOpenDelayPanel = { onOpenPanel(Panels.AudioDelay) },
@@ -486,6 +488,7 @@ fun PlayerSheets(
       VideoZoomSheet(
         videoZoom = videoZoom,
         onSetVideoZoom = viewModel::setVideoZoom,
+        snapVideoZoom = viewModel::snapVideoZoom,
         onResetVideoPan = viewModel::resetVideoPan,
         onDismissRequest = onDismissRequest,
         zoomControlEnabled = "video-zoom" !in configOwnedOptions,
@@ -496,9 +499,8 @@ fun PlayerSheets(
     Sheets.AspectRatios -> {
       val playerPreferences = koinInject<app.gyrolet.mpvrx.preferences.PlayerPreferences>()
       val customRatiosSet by playerPreferences.customAspectRatios.collectAsState()
-      val autoCropEnabled by playerPreferences.autoCropBlackBars.collectAsState()
       val currentRatio by viewModel.currentAspectRatio.composeCollectAsState()
-      val autoCropState by viewModel.autoCropState.composeCollectAsState()
+      val currentMode by viewModel.videoAspect.composeCollectAsState()
       val customRatios =
         customRatiosSet.mapNotNull { str ->
           val parts = str.split("|")
@@ -514,21 +516,11 @@ fun PlayerSheets(
         }
 
       AspectRatioSheet(
+        currentMode = currentMode,
         currentRatio = currentRatio,
         customRatios = customRatios,
-        autoCropEnabled = autoCropEnabled,
-        autoCropState = autoCropState,
-        autoCropControlEnabled = MpvConfigControlledFeatures.AUTO_CROP.none(configOwnedOptions::contains),
-        onAutoCropChanged = viewModel::setAutoCropBlackBars,
-        onSelectRatio = { ratio ->
-          if (ratio < 0) {
-            // Default selected - apply Fit mode
-            viewModel.changeVideoAspect(app.gyrolet.mpvrx.ui.player.VideoAspect.Fit)
-          } else {
-            // Custom ratio selected
-            viewModel.setCustomAspectRatio(ratio)
-          }
-        },
+        onSelectMode = { viewModel.changeVideoAspect(it) },
+        onSelectRatio = { viewModel.setCustomAspectRatio(it) },
         onAddCustomRatio = { label, ratio ->
           playerPreferences.customAspectRatios.set(customRatiosSet + "$label|$ratio")
           viewModel.setCustomAspectRatio(ratio)
@@ -727,6 +719,57 @@ fun PlayerSheets(
         onSelectAudio = onSelectAudio,
         onDismissRequest = onDismissRequest,
       )
+    }
+  }
+}
+
+private class TrackFileRequest(
+  val mimeTypes: Array<String>,
+  val extensions: List<String> = emptyList(),
+  val initialPath: String? = null,
+  val matchToName: String? = null,
+)
+
+private class TrackFileContract : ActivityResultContract<TrackFileRequest, Uri?>() {
+  private val openDocument = ActivityResultContracts.OpenDocument()
+
+  override fun createIntent(context: Context, input: TrackFileRequest): Intent =
+    openDocument.createIntent(context, input.mimeTypes).apply {
+      if (input.extensions.isNotEmpty()) {
+        putExtra(TvPickerActivity.EXTRA_EXTENSIONS, input.extensions.toTypedArray())
+        putExtra(TvPickerActivity.EXTRA_INITIAL_PATH, input.initialPath)
+        putExtra(TvPickerActivity.EXTRA_MATCH_TO_NAME, input.matchToName)
+      }
+    }
+
+  override fun parseResult(resultCode: Int, intent: Intent?): Uri? = openDocument.parseResult(resultCode, intent)
+}
+
+@Composable
+private fun rememberTrackFilePicker(
+  onPicked: (Uri) -> Unit,
+  onLocalFolderSelected: (String) -> Unit,
+): ActivityResultLauncher<TrackFileRequest> {
+  val context = LocalContext.current
+  val scope = rememberCoroutineScope()
+  val contract = remember { TrackFileContract() }
+  return rememberLauncherForActivityResult(contract) { uri ->
+    if (uri == null) return@rememberLauncherForActivityResult
+    if (uri.authority != TvDocumentUris.authority(context)) {
+      onPicked(uri)
+    } else {
+      scope.launch {
+        val localFile = withContext(Dispatchers.IO) {
+          try {
+            TvDocumentUris.file(context, DocumentsContract.getDocumentId(uri)).takeIf(File::canRead)
+          } catch (_: IOException) {
+            null // Let the player report an unavailable document through its existing URI path.
+          }
+        }
+        localFile?.parent?.let(onLocalFolderSelected)
+        // Keep the real path for mpv formats with sidecar files (e.g. .idx + .sub).
+        onPicked(localFile?.let(Uri::fromFile) ?: uri)
+      }
     }
   }
 }

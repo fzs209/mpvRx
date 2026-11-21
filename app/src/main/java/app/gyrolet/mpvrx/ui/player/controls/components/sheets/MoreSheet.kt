@@ -32,6 +32,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
@@ -238,36 +239,28 @@ fun MoreSheet(
       LazyRow(
         horizontalArrangement = Arrangement.spacedBy(MaterialTheme.spacing.smaller),
       ) {
-        items(8, key = { it }) { page ->
+        items(9, key = { it }) { page ->
           FilterChip(
             label = {
               Text(
-                if (page == 7) {
-                  "Console"
-                } else {
-                  stringResource(
-                    if (page == 0) {
-                      R.string.player_sheets_tracks_off
-                    } else {
-                      R.string.player_sheets_stats_page_chip
-                    },
-                    page,
-                  )
+                when (page) {
+                  0 -> stringResource(R.string.player_sheets_tracks_off)
+                  8 -> stringResource(R.string.player_sheets_stats_page_console)
+                  else -> stringResource(R.string.player_sheets_stats_page_chip, page)
                 },
               )
             },
+            selected = statisticsPage == page,
             onClick = {
               // One coordinator owns the chips, the preference and mpv's stats.lua state; it
               // closes the console itself and keeps the overlay from being blind-toggled.
               PlaybackSession.setStatisticsPage(page)
             },
-            selected = statisticsPage == page,
-            leadingIcon = null,
-            colors = androidx.compose.material3.FilterChipDefaults.filterChipColors(
-                  containerColor = playerSheetSelectionColor(false),
-                  selectedContainerColor = playerSheetSelectionColor(true),
-                  selectedLabelColor = MaterialTheme.colorScheme.onSecondaryContainer,
-                ),
+            colors = FilterChipDefaults.filterChipColors(
+              containerColor = playerSheetSelectionColor(false),
+              selectedContainerColor = playerSheetSelectionColor(true),
+              selectedLabelColor = MaterialTheme.colorScheme.onSecondaryContainer,
+            ),
           )
         }
       }
@@ -300,12 +293,11 @@ fun MoreSheet(
               label = { Text(stringResource(mode.titleRes)) },
               selected = anime4KUiState.selectedMode == mode.name,
               enabled = anime4KEnabled && (anime4KUiState.allowHighRes || mode == Anime4KManager.Mode.OFF),
-              leadingIcon = null,
-              colors = androidx.compose.material3.FilterChipDefaults.filterChipColors(
-                  containerColor = playerSheetSelectionColor(false),
-                  selectedContainerColor = playerSheetSelectionColor(true),
-                  selectedLabelColor = MaterialTheme.colorScheme.onSecondaryContainer,
-                ),
+              colors = FilterChipDefaults.filterChipColors(
+                containerColor = playerSheetSelectionColor(false),
+                selectedContainerColor = playerSheetSelectionColor(true),
+                selectedLabelColor = MaterialTheme.colorScheme.onSecondaryContainer,
+              ),
               onClick = { onAnime4KModeSelected(mode) },
             )
           }
@@ -385,7 +377,7 @@ fun TimePickerDialog(
                 },
                 label = { Text(stringResource(R.string.generic_minutes_short, minutes)) },
                 leadingIcon = null,
-                colors = androidx.compose.material3.FilterChipDefaults.filterChipColors(
+                colors = FilterChipDefaults.filterChipColors(
                   containerColor = playerSheetSelectionColor(false),
                   selectedContainerColor = playerSheetSelectionColor(true),
                   selectedLabelColor = MaterialTheme.colorScheme.onSecondaryContainer,

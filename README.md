@@ -83,7 +83,9 @@ mpvRx pushes the mpv-android experience further with deep customization, thermal
 | **Long-Press Dynamic Speed** | Long-press activates configurable speed boost; swipe left/right to adjust across 8 presets |
 | **Subtitle Drag Gesture** | Hold the center to move primary subtitles; hold either subtitle directly to move that track independently |
 | **Subtitle Zoom & Dialogue Seek** | Pinch subtitle text to resize it and swipe across subtitles to seek between dialogue lines |
-| **Pinch-to-Zoom with Pan** | Pinch to zoom (-1x to 3x) with simultaneous pan and single-finger pan after zoom |
+| **Pinch-to-Zoom with Pan** | Pinch near Fit, the detected black-bar boundary, or screen fill to snap to that zoom level. You can pinch past each stop and pan as usual. |
+| **Aspect Ratio** | Modes cycle through **Fit Screen** (default), **Stretch**, and **Crop**. |
+| **Ambient in Fit Screen** | Ambient checks the top, bottom, left, and right edges for baked-in black bars, trims confirmed bars, and fills the space around the picture. Turning Ambient off restores the original frame. Stretch, Crop, and fixed or custom ratios do not auto-trim. |
 | **Volume Boost via Gesture** | Vertical swipe volume can exceed 100% into configurable boost range |
 | **Swap Volume/Brightness Sides** | Option to swap which screen side controls volume vs brightness |
 
@@ -99,7 +101,6 @@ mpvRx pushes the mpv-android experience further with deep customization, thermal
 | **SDR-to-HDR Boost** | Boost SDR content into HDR range when using Linear HDR pipeline |
 | **GPU Deband** | CPU (gradfun) or GPU deband with configurable iterations, threshold, range, grain |
 | **Smart Render Backend** | Auto-selects between OpenGL/Vulkan and gpu/gpu-next based on device support |
-| **Automatic Black-Bar Cropping** | Optional analysis detects and removes encoded black borders on supported videos |
 
 </details>
 
@@ -207,6 +208,7 @@ mpvRx pushes the mpv-android experience further with deep customization, thermal
 | Feature | Description |
 |---|---|
 | **Dual Browser Modes** | Album View (folder grid) and Tree View (file manager hierarchy) |
+| **Android TV File Picker** | **Open file** browses internal storage and readable USB drives with the D-pad. **Back** goes up one level and returns focus to the folder you left. Select **Search** to filter the current folder. Use **Grant access** if needed, or **System file picker** when your TV has one. |
 | **Folder Pinning** | Pin frequently accessed folders to top |
 | **Single-Child Auto-Flatten** | Folders with one subfolder auto-flatten for faster browsing |
 | **Auto-Scroll to Last Played** | Opens to the last played video position |
@@ -281,7 +283,7 @@ mpvRx pushes the mpv-android experience further with deep customization, thermal
 
 | Feature | Description |
 |---|---|
-| **Sequential Torrent Engine** | Powered by high-speed native Go bridge (`anacrolix/torrent`) with sequential piece prioritization |
+| **Torrent Streaming & Downloads** | On torrent-enabled builds, open a magnet or `.torrent` file, then play or download individual media files. Downloads run in the background, appear on the **Downloads** screen, and save to the `Torrents` subfolder of your configured download location. |
 | **Instant Streaming** | Stream magnet links, `.torrent` files, direct web streams (HLS, MP4), and YouTube URLs |
 | **Cinematic Discovery** | Hero banner carousel, Continue Watching row, and 2:3 vertical poster cards for saved media |
 | **Automated TMDB Enrichment** | Fetches posters, backdrops, storyline synopsis, release years, and media types via Wyzie/TMDB |
@@ -324,7 +326,7 @@ mpvRx pushes the mpv-android experience further with deep customization, thermal
 
 | Feature | Description |
 |---|---|
-| **Stats Page 6** | Live system monitor: FPS, dropped frames, codecs, network sparkline, battery |
+| **Stats Page 7** | Live system monitor: FPS, dropped frames, codecs, network sparkline, battery |
 | **Video Compressor** | Built-in FFmpeg-based compression with presets |
 | **12 Video Filter Presets** | Vivid, Cinematic, Dramatic, Ghibli Style, Neon Pop, Deep Black, and more |
 | **Custom Skip Segments** | Intro/outro/recap/credits/preview detection from IntroDB, TIDB v3, AniSkip v2, Anime Skip, and SkipDB (requires an IMDb ID). Hybrid uses one validated provider result; duration-aware caches keep release versions separate. |
@@ -363,7 +365,7 @@ First Pro Tip Keep Mpv Conf empty if you are newbie
 
 **My POV:** mpv's default config with `profile=fast` and the `gpu` backend plays video with negligible battery impact — often **less** than OEM players because mpv doesn't have a billion proprietary DRM modules, analytics SDKs, and ad frameworks burning CPU in the background. The next time your battery drops more than 20-25% watching a 2-hour movie, don't blame mpv. Blame the 14 shaders you blindly copy-pasted.
 
-_Just a Pro tip if your battery consumption stays within 200 mAh and belwo 0.9W ( See Page 6 of mpvRx - video player More Settings -> Page6) useage than ur Mpv Conf are Proper for Video watching thats what i have experimented and telling rest all i don't know About in detail technicality's if anyone wanna tell me In depth guide then keep it to yourself i dont wanna listen_
+_Just a Pro tip if your battery consumption stays within 200 mAh and belwo 0.9W ( See Page 7 of mpvRx - video player More Settings -> Page7) useage than ur Mpv Conf are Proper for Video watching thats what i have experimented and telling rest all i don't know About in detail technicality's if anyone wanna tell me In depth guide then keep it to yourself i dont wanna listen_
 
 ---
 
