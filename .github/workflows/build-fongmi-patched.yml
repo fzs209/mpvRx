@@ -27,6 +27,14 @@ name: Build FongMi Patched (mpv DV sink fix)
 # branch's current tree so mpv.sh's reverse check recognises them as
 # already applied and skips them.
 #
+# The workflow also enables the tree module in mpvlibAndroid's minimal
+# libxml2 build (scripts/libxml2.sh). That build exists for fontconfig and
+# omits the tree module, so its headers do not declare xmlDocDumpMemoryEnc;
+# FFmpeg's TTML decoder calls that function, so whenever the native prefix
+# is rebuilt from scratch (a cache miss, e.g. after the FongMi/FFmpeg head
+# moves) the FFmpeg build fails in libavformat. Enabling tree keeps the
+# TTML decoder and everything else intact.
+#
 # The native build mirrors Riteshp2001/mpvlibAndroid's own build.yml (branch
 # mpv-fongmi), restricted to arm64. FongMi/mpv is NOT pinned to a commit: the
 # build uses the fongmi branch head exactly as ci.sh install cloned it, the
@@ -149,6 +157,18 @@ jobs:
           sed -i 's/^ENABLE_X86_ARCH=true/ENABLE_X86_ARCH=false/' \
             mpvlib/buildscripts/include/build_config.sh
           grep '^ENABLE_X86_ARCH' mpvlib/buildscripts/include/build_config.sh
+
+      - name: Enable libxml2 tree module for FFmpeg
+        shell: bash
+        run: |
+          set -euo pipefail
+          # mpvlibAndroid builds libxml2 minimal for fontconfig, without the
+          # tree module; FFmpeg's TTML decoder needs it (see header comment).
+          # Must happen before "ci.sh export" so the recipe change feeds the
+          # cache identifier like the arm64 restriction above does.
+          sed -i 's/-D{push,reader,sax1,iso8859x,pattern}=enabled/-D{push,reader,sax1,iso8859x,pattern,tree}=enabled/' \
+            mpvlib/buildscripts/scripts/libxml2.sh
+          grep 'Dminimum' mpvlib/buildscripts/scripts/libxml2.sh
 
       - name: Validate mpvlib version
         working-directory: mpvlib
