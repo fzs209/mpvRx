@@ -26,6 +26,12 @@ class SubtitlesPreferences(
   preferenceStore: PreferenceStore,
 ) {
   val preferredLanguages = preferenceStore.getString("sub_preferred_languages")
+  // When off, the subtitle track saved for a file (including subtitles-off) is not
+  // restored on the next open and does not influence the automatic selection; every
+  // open is decided by the preferred-language rules, exactly as if the file had
+  // never been played. The saved values are left untouched and apply again if the
+  // setting is turned back on.
+  val rememberTrackSelection = preferenceStore.getBoolean("sub_remember_track_selection", true)
   val autoloadMatchingSubtitles = preferenceStore.getBoolean("sub_autoload_enabled", true)
   val autoEnableSubtitles = preferenceStore.getBoolean("sub_auto_enable", true)
 

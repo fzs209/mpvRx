@@ -575,6 +575,21 @@ object AudioPreferencesScreen : ScrollableSettingsScreen {
               }
 
               PreferenceDivider()
+              val rememberTrackSelection by preferences.rememberTrackSelection.collectAsState()
+              SwitchPreference(
+                modifier = Modifier.settingsSearchTarget(R.string.pref_audio_remember_track_selection_title),
+                value = rememberTrackSelection,
+                onValueChange = { preferences.rememberTrackSelection.set(it) },
+                title = { Text(stringResource(R.string.pref_audio_remember_track_selection_title)) },
+                summary = {
+                  Text(
+                    stringResource(R.string.pref_audio_remember_track_selection_summary),
+                    color = MaterialTheme.colorScheme.outline,
+                  )
+                },
+              )
+
+              PreferenceDivider()
               val audioPitchCorrection by preferences.audioPitchCorrection.collectAsState()
               SwitchPreference(
                 modifier = Modifier.settingsSearchTarget(R.string.pref_audio_pitch_correction_title),

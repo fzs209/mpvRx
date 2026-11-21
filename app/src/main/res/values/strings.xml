@@ -379,6 +379,10 @@
   <string name="pref_custom_lua_title">Custom buttons</string>
   <string name="pref_custom_lua_summary">Manage script-powered player buttons</string>
   <string name="pref_preferred_languages">Preferred languages</string>
+  <string name="pref_audio_remember_track_selection_title">Remember audio track selection</string>
+  <string name="pref_audio_remember_track_selection_summary">Restore the audio track picked by hand when this file is opened again. When off, the preferred-language rules decide on every open.</string>
+  <string name="pref_subtitles_remember_track_selection_title">Remember subtitle track selection</string>
+  <string name="pref_subtitles_remember_track_selection_summary">Restore the subtitle track from the last playback, including subtitles off. When off, the preferred-language rules decide on every open.</string>
   <string name="pref_subtitles_fonts_dir">Fonts directory</string>
   <string name="pref_subtitles_font_title">Subtitle font</string>
   <string name="pref_subtitles_font_summary">Selected: %1$s</string>

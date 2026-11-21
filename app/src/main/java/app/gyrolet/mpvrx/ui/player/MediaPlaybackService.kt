@@ -2253,6 +2253,7 @@ class MediaPlaybackService :
    * keeps the stored list, exactly like externalSubtitles on this path.
    */
   private fun captureSessionManualAudioId(identifier: String): Int? {
+    if (!audioPreferences.rememberTrackSelection.get()) return null
     if (MpvConfigOverridePolicy.ownsAny(MpvConfigControlledFeatures.AUDIO_TRACK_SELECTION)) return null
     val marked = ManualAudioSelectionTracker.markedTrackId(identifier) ?: return null
     val current = readMpvTrackId("aid", -1)
