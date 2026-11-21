@@ -1,28 +1,38 @@
 name: Build FongMi Patched (mpv DV sink fix)
 
-# Builds the FongMi mpvlib AAR from source inside this repository's CI with
-# native-patches/fongmi-mpv-dolby-vision-output-mode.patch applied to FongMi/mpv,
-# then builds the FongMi APK against that AAR.
+# Builds the FongMi mpvlib AAR from source inside this repository's CI, then
+# builds the FongMi APK against that AAR.
 #
 # Why: mpvRx consumes mpvlib as a prebuilt AAR (app.gyrolet.mpvlib:mpvlib-fongmi),
-# so the fix for "Dolby Vision over mediacodec_embed is audio-only on devices
-# without a DV decoder" can only ship by rebuilding the AAR. Stock mpv derives
-# the FFmpeg dovi_sink_support flag from the VO's static VO_CAP_NATIVE_DOVI
-# capability, so mediacodec_embed always demands a native DV decoder. The patch
-# makes the sink a per-session state, enabled only while the session actually
-# uses Direct Dolby Vision output (which the app selects from its one-time,
-# process-cached decoder capability probe); otherwise FFmpeg falls back to the
-# base-layer decoder even under mediacodec_embed.
+# so core changes for the FongMi flavour can only ship by rebuilding the AAR.
+#
+# Dolby Vision: FongMi's mpv now implements the output-mode mechanism in the
+# core itself. The app sets android-dolby-vision-output to "direct" only when
+# the device has a DV decoder (its one-time, process-cached probe); the core
+# then creates the direct mediacodec_embed output with the native DV sink
+# enabled for that session only, and FFmpeg falls back to the base-layer
+# decoder otherwise. The fork's earlier sink patch
+# (native-patches/fongmi-mpv-dolby-vision-output-mode.patch, and
+# mpvlibAndroid's copy of it) predates that rework and no longer applies;
+# neither is used any more.
+#
+# mpvlibAndroid's patch set has not caught up with the current FongMi/mpv
+# head: its pause-passthrough, OSD VAO and Dolby Vision patch files fail
+# there because the branch has absorbed their contents (the pause patch
+# only in part - its vo.c and command.c hunks are still missing). The
+# workflow therefore overrides those three files in the mpvlibAndroid
+# checkout with the fork-maintained copies in
+# native-patches/mpvlib-overrides/: the pause override keeps only the
+# hunks the branch still lacks, and the other two are written against the
+# branch's current tree so mpv.sh's reverse check recognises them as
+# already applied and skips them.
 #
 # The native build mirrors Riteshp2001/mpvlibAndroid's own build.yml (branch
 # mpv-fongmi), restricted to arm64. FongMi/mpv is NOT pinned to a commit: the
 # build uses the fongmi branch head exactly as ci.sh install cloned it, the
-# same source the upstream mpvlibAndroid build uses. The Dolby Vision sink
-# patch in native-patches/ is maintained against that moving branch head;
-# if the branch moves so the patch no longer applies, the patch is refreshed
-# rather than the mpv revision being pinned back. mpvlibAndroid's own
-# patches (including mpv_video_shaders.patch) are applied in full, exactly
-# as upstream applies them.
+# same source the upstream mpvlibAndroid build uses. The remaining
+# mpvlibAndroid patches are applied in full, exactly as upstream applies
+# them.
 #
 # The APK step resolves mpvlib from a local ivy directory staged by this
 # workflow via -PmpvlibReleasesUrl (see settings.gradle.kts); every other
@@ -99,6 +109,24 @@ jobs:
           repository: Riteshp2001/mpvlibAndroid
           ref: mpv-fongmi
           path: mpvlib
+
+      - name: Override stale mpvlibAndroid mpv patches
+        shell: bash
+        run: |
+          set -euo pipefail
+          # mpvlibAndroid's pause-passthrough, OSD VAO and Dolby Vision patch
+          # files no longer apply to the current FongMi/mpv head: the branch
+          # has absorbed their contents (the pause patch only in part). The
+          # fork-maintained copies either supply the hunks the branch still
+          # lacks (pause) or are recognised as already applied by mpv.sh's
+          # reverse check (OSD, Dolby Vision). See the header comment.
+          for name in mpv_android_pause_passthrough.patch \
+            mpv_osd_vao_fix.patch \
+            mpv_dolby_vision_output_mode.patch; do
+            cp "native-patches/mpvlib-overrides/$name" \
+              "mpvlib/buildscripts/patches/$name"
+            echo "overrode $name"
+          done
 
       - name: Restrict native build to arm64
         shell: bash
@@ -260,21 +288,6 @@ jobs:
           path: mpvlib/gh-libplacebo-cache/
           key: libplacebo-${{ runner.os }}-${{ env.LIBPLACEBO_CACHE_IDENTIFIER }}
 
-      - name: Apply Dolby Vision sink patch
-        shell: bash
-        run: |
-          set -euxo pipefail
-          mpv_dir="mpvlib/buildscripts/deps/mpv"
-
-          # ci.sh install cloned the fongmi branch; use that branch head
-          # as-is (no commit pin). The sink patch is maintained against
-          # the moving branch head.
-          echo "mpv revision: $(git -C "$mpv_dir" rev-parse HEAD)"
-          git -C "$mpv_dir" apply --check \
-            "$GITHUB_WORKSPACE/native-patches/fongmi-mpv-dolby-vision-output-mode.patch"
-          git -C "$mpv_dir" apply \
-            "$GITHUB_WORKSPACE/native-patches/fongmi-mpv-dolby-vision-output-mode.patch"
-          git -C "$mpv_dir" diff --stat
 
       - name: Build AAR for arm64
         working-directory: mpvlib/buildscripts

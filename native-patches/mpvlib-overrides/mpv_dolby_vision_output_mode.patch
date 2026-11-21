@@ -1,0 +1,14 @@
+diff --git b/video/decode/vd_lavc.c a/video/decode/vd_lavc.c
+index 12fd062..67c3b41 100644
+--- b/video/decode/vd_lavc.c
++++ a/video/decode/vd_lavc.c
+@@ -1021,8 +1021,7 @@ static void init_avctx(struct mp_filter *vd)
+         break;
+     }
+ 
+-    bool native_dovi_sink =
+-        ctx->vo && (ctx->vo->driver->caps & VO_CAP_NATIVE_DOVI);
++    bool native_dovi_sink = ctx->vo && ctx->vo->extra.native_dovi_sink;
+     bool gpu_dovi_mapping = supports_gpu_dovi_mapping(ctx);
+     set_decoder_avopts(vd->log, avctx, lavc_param->avopts,
+                        native_dovi_sink, gpu_dovi_mapping);
