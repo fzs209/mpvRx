@@ -5649,11 +5649,9 @@ class PlayerActivity :
    * example the audio track paired with a video-quality change) must not be stored as the
    * user's choice, and the previously stored record is then kept instead (see
    * PlaybackStatePersistence.buildEntity). While mpv.conf owns audio selection the app
-   * does not record picks either: it does not intervene in that mode at all. The same
-   * applies while "remember audio track selection" is turned off in settings.
+   * does not record picks either: it does not intervene in that mode at all.
    */
   private fun captureSessionManualAudioId(identifier: String): Int? {
-    if (!audioPreferences.rememberTrackSelection.get()) return null
     if (MpvConfigOverridePolicy.ownsAny(MpvConfigControlledFeatures.AUDIO_TRACK_SELECTION)) return null
     val marked = ManualAudioSelectionTracker.markedTrackId(identifier) ?: return null
     return marked.takeIf { it == getTrackSelectionId("aid") }
@@ -5763,14 +5761,10 @@ class PlayerActivity :
         applyDefaultSettings(state)
       }
 
-      // With "remember subtitle track selection" off, the saved state must not
-      // influence TrackSelector at all: the open is treated as a first open, so the
-      // automatic preferred-language rules decide the subtitle track.
-      val rememberSubtitleTrack = subtitlesPreferences.rememberTrackSelection.get()
       LoadedPlaybackState(
         hasState = state != null || positionRestoreOverride != null,
-        hasSavedTracks = state != null && rememberSubtitleTrack,
-        subtitlesOff = rememberSubtitleTrack && state != null && state.sid <= 0,
+        hasSavedTracks = state != null,
+        subtitlesOff = state != null && state.sid <= 0,
         audioDecidedByRestore = audioDecided,
       )
     }.onFailure { e ->
@@ -5820,9 +5814,7 @@ class PlayerActivity :
     }
     if (!PlaybackSession.isCurrentGeneration(loadGeneration)) return false
 
-    if (subtitlesPreferences.rememberTrackSelection.get() &&
-      !MpvConfigOverridePolicy.ownsAny(MpvConfigControlledFeatures.SUBTITLE_TRACK_SELECTION)
-    ) {
+    if (!MpvConfigOverridePolicy.ownsAny(MpvConfigControlledFeatures.SUBTITLE_TRACK_SELECTION)) {
       val restoredSid = state.sid.takeIf { it > 0 }?.toString() ?: "no"
       if (player.sid != (state.sid.takeIf { it > 0 } ?: -1)) {
         PlaybackSession.commandForGeneration(loadGeneration, "set", "sid", restoredSid)

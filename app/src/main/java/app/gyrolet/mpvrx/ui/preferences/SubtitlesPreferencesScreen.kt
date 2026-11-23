@@ -359,22 +359,6 @@ object SubtitlesPreferencesScreen : ScrollableSettingsScreen {
 
               PreferenceDivider()
 
-              val rememberTrackSelection by preferences.rememberTrackSelection.collectAsState()
-              SwitchPreference(
-                modifier = Modifier.settingsSearchTarget(R.string.pref_subtitles_remember_track_selection_title),
-                value = rememberTrackSelection,
-                onValueChange = { preferences.rememberTrackSelection.set(it) },
-                title = { Text(stringResource(R.string.pref_subtitles_remember_track_selection_title)) },
-                summary = {
-                  Text(
-                    stringResource(R.string.pref_subtitles_remember_track_selection_summary),
-                    color = MaterialTheme.colorScheme.outline,
-                  )
-                },
-              )
-
-              PreferenceDivider()
-
               val autoload by preferences.autoloadMatchingSubtitles.collectAsState()
               SwitchPreference(
                 modifier = Modifier.settingsSearchTarget(R.string.pref_subtitles_autoload_title),

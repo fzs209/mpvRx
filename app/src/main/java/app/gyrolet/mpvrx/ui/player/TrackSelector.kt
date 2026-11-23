@@ -39,10 +39,6 @@ import kotlinx.coroutines.withContext
  *
  * A saved subtitles-off choice remains off.
  *
- * Both saved selections are subject to the "remember track selection" settings: with
- * remembering off for a side, its saved selection is never applied here and the
- * automatic rules decide every open as if the file had never been played.
- *
  * Based on https://github.com/Chinna95P/mpv-anime-build/blob/main/scripts/track-selector.lua.
  */
 class TrackSelector(
@@ -87,8 +83,7 @@ class TrackSelector(
    * can point at one of them, and it only exists again once re-added.
    *
    * Returns true when the manual record decided this load (including manual audio-off).
-   * Returns false when there is no manual record, when remembering the audio track
-   * selection is turned off in settings, when mpv.conf owns audio selection, or
+   * Returns false when there is no manual record, when mpv.conf owns audio selection, or
    * when the saved track id is not usable for this load — the file may have been replaced
    * or re-encoded, or the id may now belong to a track of another type. That last case is
    * "not applicable this time", not "record void": the stored record is left untouched and
@@ -102,7 +97,6 @@ class TrackSelector(
     expectedGeneration: Long = PlaybackSession.state.value.generation,
   ): Boolean = withContext(Dispatchers.IO) {
     if (!state.hasManualAudioSelection) return@withContext false
-    if (!audioPreferences.rememberTrackSelection.get()) return@withContext false
     if (MpvConfigOverridePolicy.ownsAny(MpvConfigControlledFeatures.AUDIO_TRACK_SELECTION)) {
       return@withContext false
     }

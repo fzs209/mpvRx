@@ -21,11 +21,6 @@ class AudioPreferences(
   preferenceStore: PreferenceStore,
 ) {
   val preferredLanguages = preferenceStore.getString("audio_preferred_languages")
-  // When off, a hand-picked audio track is neither recorded nor restored on the next
-  // open; every open is decided by the automatic preferred-language rules, exactly as
-  // if the file had never been played. A record stored while this was on is left
-  // untouched and applies again if the setting is turned back on.
-  val rememberTrackSelection = preferenceStore.getBoolean("audio_remember_track_selection", true)
   val defaultAudioDelay = preferenceStore.getInt("audio_delay_default")
   val pickerPath = preferenceStore.getString("audio_picker_path")
   val audioPitchCorrection = preferenceStore.getBoolean("audio_pitch_correction", true)
