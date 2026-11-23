@@ -42,6 +42,7 @@ class VideoMetadataCacheRepository(
     private const val CACHE_VALIDITY_DAYS = 30L
     private const val MAINTENANCE_PREFS = "video_metadata_cache"
     private const val LAST_MAINTENANCE_MS = "last_maintenance_ms"
+    private const val METADATA_VERSION = "metadata_version"
     private const val MAINTENANCE_INTERVAL_MS = 7L * 24L * 60L * 60L * 1000L
     private const val CONTENT_KEY_PREFIX = "content-metadata:"
   }
@@ -53,6 +54,23 @@ class VideoMetadataCacheRepository(
   // version key (content key + size + modified time), so a broken or exotic file is not
   // re-probed from scratch on every folder visit. A changed file gets a new key.
   private val failedContentProbes = ConcurrentHashMap.newKeySet<String>()
+
+  private val metadataVersionLock = Mutex()
+  @Volatile private var metadataVersionChecked = false
+
+  private suspend fun ensureMetadataVersion() {
+    if (metadataVersionChecked) return
+    metadataVersionLock.withLock {
+      if (metadataVersionChecked) return@withLock
+      val prefs = context.getSharedPreferences(MAINTENANCE_PREFS, Context.MODE_PRIVATE)
+      if (prefs.getInt(METADATA_VERSION, 0) != MediaInfoOps.BASIC_METADATA_VERSION) {
+        dao.clearAll()
+        prefs.edit().putInt(METADATA_VERSION, MediaInfoOps.BASIC_METADATA_VERSION).apply()
+        Log.d(TAG, "Invalidated metadata cached before the current container probe")
+      }
+      metadataVersionChecked = true
+    }
+  }
 
   private fun contentKey(path: String, uri: Uri): String =
     CONTENT_KEY_PREFIX + (ScopedHiddenFolderScanner.localPathOf(uri)
@@ -72,6 +90,7 @@ class VideoMetadataCacheRepository(
   /** Read known durations without opening any document or consulting the filesystem. */
   suspend fun getCachedContentMetadata(videos: List<Video>): Map<String, MediaInfoOps.VideoMetadata> =
     withContext(Dispatchers.IO) {
+      ensureMetadataVersion()
       val sources = videos.filter { it.uri.scheme == "content" }
       val keys = sources.associateWith { contentKey(it.path, it.uri) }
       val cached = keys.values.distinct().chunked(900)
@@ -94,6 +113,7 @@ class VideoMetadataCacheRepository(
     video: Video,
     includeVideoCodec: Boolean = false,
   ): MediaInfoOps.VideoMetadata? = withContext(Dispatchers.IO) {
+    ensureMetadataVersion()
     val key = contentKey(video.path, video.uri)
     val versionKey = "$key|${video.size}|${video.dateModified}"
     contentLocks[(key.hashCode() and Int.MAX_VALUE) % contentLocks.size].withLock {
@@ -156,6 +176,7 @@ class VideoMetadataCacheRepository(
     includeVideoCodec: Boolean = false,
   ): MediaInfoOps.VideoMetadata? =
     withContext(Dispatchers.IO) {
+      ensureMetadataVersion()
       val path = file.absolutePath
       val size = file.length()
       val dateModified = file.lastModified() / 1000
@@ -221,6 +242,7 @@ class VideoMetadataCacheRepository(
   ): Map<String, MediaInfoOps.VideoMetadata> =
     withContext(Dispatchers.IO) {
       if (files.isEmpty()) return@withContext emptyMap()
+      ensureMetadataVersion()
 
       val results = mutableMapOf<String, MediaInfoOps.VideoMetadata>()
 

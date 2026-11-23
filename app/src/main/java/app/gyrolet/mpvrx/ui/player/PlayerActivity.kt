@@ -1535,6 +1535,35 @@ class PlayerActivity :
     return Rect(bounds.left * scale + dx, bounds.top * scale + dy, bounds.right * scale + dx, bounds.bottom * scale + dy)
   }
 
+  private var lastVideoTransformGeneration = -1L
+  private var lastVideoTransformZoom: Float? = null
+  private var lastVideoTransformPanX: Float? = null
+  private var lastVideoTransformPanY: Float? = null
+  private var lastVideoTransformFollowVideo: Boolean? = null
+  private var lastZoomAspectKey: List<Any?>? = null
+  private var lastZoomAspect = 0f
+
+  private fun videoZoomPanAspect(): Float {
+    val crop = PlaybackSession.propString["video-crop"].value
+    val key =
+      listOf(
+        PlaybackSession.state.value.generation,
+        crop,
+        PlaybackSession.propDouble["video-aspect-override"].value,
+        PlaybackSession.propDouble["video-out-params/aspect"].value,
+        PlaybackSession.propDouble["video-params/aspect"].value,
+      )
+    if (key == lastZoomAspectKey) return lastZoomAspect
+    lastZoomAspectKey = key
+    val croppedAspect = crop?.takeIf { it.isNotEmpty() }
+      ?.let { VideoAspectGeometry.currentEffectiveDisplayAspect() }
+    lastZoomAspect = (
+      croppedAspect ?: PlaybackSession.propDouble["video-out-params/aspect"].value
+        ?: PlaybackSession.propDouble["video-params/aspect"].value ?: 0.0
+      ).toFloat()
+    return lastZoomAspect
+  }
+
   private fun setupVideoTransformObserver() {
     binding.player.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> applyVideoTransform() }
     lifecycleScope.launch {
@@ -1562,14 +1591,20 @@ class PlayerActivity :
     binding.player.translationX = if (followVideo) panX else 0f
     binding.player.translationY = if (followVideo) panY else 0f
     if (!canIssueMpvCommands()) return
+    val generation = PlaybackSession.state.value.generation
+    if (generation == lastVideoTransformGeneration &&
+      zoom == lastVideoTransformZoom && panX == lastVideoTransformPanX &&
+      panY == lastVideoTransformPanY && followVideo == lastVideoTransformFollowVideo
+    ) return
+    lastVideoTransformGeneration = generation
+    lastVideoTransformZoom = zoom
+    lastVideoTransformPanX = panX
+    lastVideoTransformPanY = panY
+    lastVideoTransformFollowVideo = followVideo
     val (mpvPanX, mpvPanY) = if (followVideo) {
       0f to 0f
     } else {
-      val croppedAspect = PlaybackSession.propString["video-crop"].value
-        ?.takeIf { it.isNotEmpty() }
-        ?.let { VideoAspectGeometry.currentEffectiveDisplayAspect() }
-      val aspect = (croppedAspect ?: PlaybackSession.getPropertyDouble("video-out-params/aspect")
-        ?: PlaybackSession.getPropertyDouble("video-params/aspect") ?: 0.0).toFloat()
+      val aspect = videoZoomPanAspect()
       videoPanFractions(player.width.toFloat(), player.height.toFloat(), aspect, zoom, panX, panY)
     }
     PlaybackSession.setPropertyFloat("video-zoom", if (followVideo) 0f else zoom)
@@ -5454,6 +5489,7 @@ class PlayerActivity :
     val borderStyle = subtitlesPreferences.borderStyle.get().value
     val borderSize = subtitlesPreferences.borderSize.get()
     val shadowOffset = subtitlesPreferences.shadowOffset.get()
+    val backgroundRadius = subtitlesPreferences.backgroundRadius.get()
 
     // Color settings
     val textColor = subtitlesPreferences.textColor.get().toColorHexString()
@@ -5475,6 +5511,7 @@ class PlayerActivity :
     PlaybackSession.setPropertyInt("sub-border-size", borderSize)
     PlaybackSession.setPropertyInt("sub-outline-size", borderSize)
     PlaybackSession.setPropertyInt("sub-shadow-offset", shadowOffset)
+    PlaybackSession.setPropertyInt("sub-back-radius", backgroundRadius)
     PlaybackSession.setPropertyString("sub-color", textColor)
     PlaybackSession.setPropertyString("sub-border-color", borderColor)
     PlaybackSession.setPropertyString("sub-back-color", backgroundColor)

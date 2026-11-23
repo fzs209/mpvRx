@@ -14,6 +14,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import android.provider.OpenableColumns
+import android.text.format.Formatter
 import android.util.Log
 import app.gyrolet.mpvrx.ui.components.AppToast as Toast
 import androidx.activity.SystemBarStyle
@@ -70,8 +71,10 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
@@ -100,7 +103,6 @@ import app.gyrolet.mpvrx.preferences.AppearancePreferences
 import app.gyrolet.mpvrx.preferences.preference.collectAsState
 import app.gyrolet.mpvrx.ui.icons.Icon
 import app.gyrolet.mpvrx.ui.icons.Icons
-import app.gyrolet.mpvrx.ui.player.PlaybackFormatBadge
 import app.gyrolet.mpvrx.ui.player.controls.components.MediaFormatBadges
 import app.gyrolet.mpvrx.ui.player.controls.components.tvFocusHighlight
 import app.gyrolet.mpvrx.ui.player.resolveLocalPath
@@ -111,12 +113,16 @@ import app.gyrolet.mpvrx.ui.theme.DarkMode
 import app.gyrolet.mpvrx.ui.theme.MpvrxTheme
 import app.gyrolet.mpvrx.ui.theme.rememberConnectedShape
 import app.gyrolet.mpvrx.utils.clipboard.SafeClipboard
+import app.gyrolet.mpvrx.utils.media.MediaArtwork
+import app.gyrolet.mpvrx.utils.media.MediaArtworkOps
 import app.gyrolet.mpvrx.utils.media.MediaInfoOps
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.koin.android.ext.android.inject
+import org.koin.compose.koinInject
 import java.io.File
+import java.util.Locale
 
 private data class ValueDetailSelection(
   val label: String,
@@ -407,7 +413,6 @@ internal object MediaInfoDetails {
     @androidx.annotation.StringRes val displayNameRes: Int,
   ) {
     OVERVIEW(R.string.media_info_tab_overview),
-    THUMBNAIL(R.string.media_info_tab_thumbnail),
     VIDEO(R.string.media_info_tab_video),
     AUDIO(R.string.media_info_tab_audio),
     SUBTITLES(R.string.media_info_tab_subtitles),
@@ -450,13 +455,10 @@ internal object MediaInfoDetails {
       remember(fileUri) {
         fileUri?.let { uri -> uri.resolveLocalPath(context) ?: uri.toString() }
       }
-    val sections = remember(fullMediaInfoText) { parseMediaInfoText(fullMediaInfoText) }
-    val thumbnailVideo = remember(mediaInfo, fileUri, filePath, fileName) {
-      fileUri?.takeIf { mediaInfo.videoStreams.isNotEmpty() || mediaInfo.audioStreams.isNotEmpty() }?.let { uri ->
-        mediaInfoThumbnailVideo(mediaInfo, uri, fileName, filePath ?: uri.toString())
-      }
+    val fileHistory by produceState(emptyList<Pair<String, String>>(), fileUri, fullMediaInfoText) {
+      value = fileUri?.let { loadMediaFileHistory(context, it) }.orEmpty()
     }
-    val requestValueDetail = LocalValueDetailRequest.current
+    val sections = remember(fullMediaInfoText) { parseMediaInfoText(fullMediaInfoText) }
 
     // Group sections dynamically
     val videoSections = remember(sections) { sections.filter { it.name.startsWith("Video", ignoreCase = true) } }
@@ -503,23 +505,49 @@ internal object MediaInfoDetails {
           .orEmpty()
       }
 
+    val hasMediaStreams = audioSections.isNotEmpty() || videoSections.isNotEmpty()
+    val artwork by produceState<MediaArtwork?>(null, fileUri, fileName, hasMediaStreams) {
+      value = if (fileUri != null && hasMediaStreams) {
+        MediaArtworkOps.readEmbeddedArtwork(context, fileUri, fileName)
+      } else {
+        null
+      }
+    }
+    val currentArtwork = artwork
+    val displayedImageSections = if (imageSections.isEmpty() && currentArtwork != null) {
+      listOf(
+        InfoSection(
+          "Image",
+          listOf(
+            "Format" to currentArtwork.mimeType.substringAfter('/').uppercase(Locale.ROOT),
+            "Width" to currentArtwork.width.toString(),
+            "Height" to currentArtwork.height.toString(),
+            "Stream size" to Formatter.formatFileSize(context, currentArtwork.bytes.size.toLong()),
+          ),
+        ),
+      )
+    } else {
+      imageSections
+    }
+
     // Determine available tabs
     val availableTabs =
-      remember(sections, thumbnailVideo != null) {
+      remember(sections, currentArtwork != null) {
         buildList {
           add(InfoTab.OVERVIEW)
-          if (thumbnailVideo != null) add(InfoTab.THUMBNAIL)
           if (videoSections.isNotEmpty()) add(InfoTab.VIDEO)
           if (audioSections.isNotEmpty()) add(InfoTab.AUDIO)
           if (subtitleSections.isNotEmpty()) add(InfoTab.SUBTITLES)
-          if (imageSections.isNotEmpty()) add(InfoTab.IMAGE)
+          if (imageSections.isNotEmpty() || currentArtwork != null) add(InfoTab.IMAGE)
           if (menuSections.isNotEmpty()) add(InfoTab.CHAPTERS)
           if (otherSections.isNotEmpty() || attachmentNames.isNotEmpty()) add(InfoTab.OTHER)
           add(InfoTab.RAW)
         }
       }
 
-    var selectedTab by remember(availableTabs) { mutableStateOf(InfoTab.OVERVIEW) }
+    // Artwork discovery can add a tab after the report is already visible.
+    var requestedTab by rememberSaveable(fileUri, fileName) { mutableStateOf(InfoTab.OVERVIEW) }
+    val selectedTab = requestedTab.takeIf { it in availableTabs } ?: InfoTab.OVERVIEW
 
     Column(
       modifier =
@@ -546,19 +574,28 @@ internal object MediaInfoDetails {
               subtitleSections.size,
               menuSections.firstOrNull()?.properties?.size ?: 0,
               filePath,
+              fileHistory,
               playbackSnapshot,
             )
-          InfoTab.THUMBNAIL -> thumbnailVideo?.let { MediaThumbnailTab(it, requestValueDetail) }
-          InfoTab.VIDEO -> StreamTabContent(videoSections, "Video Stream") {
-            mediaInfo.videoStreams.getOrNull(it)?.formatBadges().orEmpty()
-          }
-          InfoTab.AUDIO -> StreamTabContent(audioSections, "Audio Stream") {
-            mediaInfo.audioStreams.getOrNull(it)?.formatBadges().orEmpty()
-          }
-          InfoTab.SUBTITLES -> StreamTabContent(subtitleSections, "Subtitle Track") {
-            mediaInfo.textStreams.getOrNull(it)?.formatBadges().orEmpty()
-          }
-          InfoTab.IMAGE -> StreamTabContent(imageSections, "Image")
+          InfoTab.VIDEO -> StreamTabContent(videoSections, "Video Stream")
+          InfoTab.AUDIO -> StreamTabContent(audioSections, "Audio Stream")
+          InfoTab.SUBTITLES -> StreamTabContent(subtitleSections, "Subtitle Track")
+          InfoTab.IMAGE ->
+            StreamTabContent(
+              displayedImageSections,
+              "Image",
+              header =
+                if (currentArtwork != null) {
+                  {
+                    MediaArtworkPanel(
+                      artwork = currentArtwork,
+                      fileName = fileName,
+                    )
+                  }
+                } else {
+                  null
+                },
+            )
           InfoTab.CHAPTERS -> ChaptersTabContent(menuSections)
           InfoTab.OTHER -> OtherTabContent(otherSections, attachmentNames)
           InfoTab.RAW -> RawTabContent(fullMediaInfoText)
@@ -569,7 +606,7 @@ internal object MediaInfoDetails {
       Row(
         modifier =
           Modifier
-            .align(Alignment.End)
+            .align(if (inPlayer) Alignment.CenterHorizontally else Alignment.End)
             .horizontalScroll(rememberScrollState())
             .padding(horizontal = 16.dp, vertical = if (inPlayer) 4.dp else 12.dp),
         horizontalArrangement = Arrangement.spacedBy(AppConnectedControlShapeTokens.spacing),
@@ -601,7 +638,7 @@ internal object MediaInfoDetails {
           )
 
           Surface(
-            onClick = { selectedTab = tab },
+            onClick = { requestedTab = tab },
             color = containerColor,
             contentColor = contentColor,
             shape = tabShape,
@@ -618,7 +655,6 @@ internal object MediaInfoDetails {
               val icon =
                 when (tab) {
                   InfoTab.OVERVIEW -> Icons.RoundedFilled.Info
-                  InfoTab.THUMBNAIL -> Icons.RoundedFilled.Image
                   InfoTab.VIDEO -> Icons.RoundedFilled.Videocam
                   InfoTab.AUDIO -> Icons.RoundedFilled.VolumeUp
                   InfoTab.SUBTITLES -> Icons.RoundedFilled.Subtitles
@@ -721,6 +757,7 @@ internal object MediaInfoDetails {
     subtitleCount: Int,
     chapterCount: Int,
     filePath: String?,
+    fileHistory: List<Pair<String, String>>,
     playbackSnapshot: Boolean,
   ) {
     // Quick Stat values
@@ -766,6 +803,7 @@ internal object MediaInfoDetails {
     val durationLabel = mediaInfo.general.duration.ifBlank { "Unknown" }
     val formatLabel = mediaInfo.general.format.ifBlank { "Unknown" }
 
+    val colorizeBadges by koinInject<AppearancePreferences>().colorizeMediaFormatBadges.collectAsState()
     val formatBadges = remember(mediaInfo, fileName) { mediaInfo.overviewBadges(fileName) }
     val heroChips =
       remember(mediaInfo, sections) {
@@ -774,8 +812,6 @@ internal object MediaInfoDetails {
             imageValue("Format").takeIf(String::isNotBlank)?.let { add(it) }
             if (imageResolution.isNotBlank()) add(imageResolution)
           }
-          if (sizeLabel != "Unknown") add(sizeLabel)
-          if (durationLabel != "Unknown") add(durationLabel)
         }
       }
 
@@ -854,6 +890,8 @@ internal object MediaInfoDetails {
             badges = formatBadges,
             modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
             background = background,
+            colorize = colorizeBadges,
+            rowSpacing = 8.dp,
           )
         }
       }
@@ -1050,9 +1088,9 @@ internal object MediaInfoDetails {
         }
       }
 
-      // Detailed metadata list: every General field MediaInfo reports, plus the resolved path.
+      // Detailed metadata list: resolved path, device file history, then every General field.
       val generalSection = sections.firstOrNull { it.name.equals("General", ignoreCase = true) }
-      if (generalSection != null || filePath != null) {
+      if (generalSection != null || filePath != null || fileHistory.isNotEmpty()) {
         ExpressiveInfoCard(
           modifier = Modifier.fillMaxWidth(),
         ) {
@@ -1071,6 +1109,7 @@ internal object MediaInfoDetails {
             val pathLabel = stringResource(R.string.media_info_file_path)
             val generalEntries = buildList<Pair<String, String>> {
               filePath?.let { add(pathLabel to it) }
+              addAll(fileHistory)
               generalSection?.properties?.let { addAll(it) }
             }
             SelectionContainer {
@@ -1140,7 +1179,6 @@ internal object MediaInfoDetails {
     headerTextColor: Color,
     properties: List<Pair<String, String>>,
     modifier: Modifier = Modifier,
-    formats: List<PlaybackFormatBadge> = emptyList(),
   ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -1183,14 +1221,7 @@ internal object MediaInfoDetails {
               style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
               color = headerTextColor,
             )
-            if (formats.isNotEmpty()) {
-              MediaFormatBadges(
-                badges = formats,
-                foreground = headerTextColor,
-                background = headerBgColor,
-                logoHeight = 18.dp,
-              )
-            } else if (badge != null) {
+            if (badge != null) {
               Surface(
                 shape = MaterialTheme.shapes.medium,
                 color = headerTextColor.copy(alpha = 0.12f),
@@ -1318,7 +1349,7 @@ internal object MediaInfoDetails {
   private fun StreamTabContent(
     sections: List<InfoSection>,
     streamTypeLabel: String,
-    formatsAt: (Int) -> List<PlaybackFormatBadge> = { emptyList() },
+    header: (@Composable () -> Unit)? = null,
   ) {
     Column(
       modifier =
@@ -1328,6 +1359,7 @@ internal object MediaInfoDetails {
           .padding(bottom = 24.dp),
       verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
+      header?.invoke()
       sections.forEachIndexed { index, section ->
         val format =
           section.properties.firstOrNull { it.first.equals("Format", ignoreCase = true) }?.second ?: "Unknown"
@@ -1370,7 +1402,6 @@ internal object MediaInfoDetails {
           headerBgColor = headerBgColor,
           headerTextColor = headerTextColor,
           properties = section.properties,
-          formats = formatsAt(index),
         )
       }
     }

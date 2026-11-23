@@ -245,7 +245,7 @@
   <string name="pref_layout_media_format_badges_title">Media format badges</string>
   <string name="pref_layout_media_format_badges_summary">Show resolution, codecs, HDR, and audio information below the video title.</string>
   <string name="pref_layout_colorize_media_format_badges_title">Colorize media format badges</string>
-  <string name="pref_layout_colorize_media_format_badges_summary">Use format colors in the player badge row. Turn off for a plain single-color look.</string>
+  <string name="pref_layout_colorize_media_format_badges_summary">Use format colors in player and Media Info badges. Turn off for theme-colored symbols and grayscale logos.</string>
   <string name="pref_layout_summary">Customize player button layout</string>
   <string name="pref_layout_reset_default">Reset to default</string>
   <string name="pref_layout_top_right_controls">Top Right Controls</string>
@@ -571,6 +571,7 @@
   <string name="player_sheets_subtitles_border_style_opaque_box">Opaque box</string>
   <string name="player_sheets_subtitles_border_style_background_box">Background box</string>
   <string name="player_sheets_subtitles_shadow_offset">Shadow offset</string>
+  <string name="player_sheets_subtitles_background_radius">Box corner radius</string>
   <string name="player_sheets_sub_color_red">Red</string>
   <string name="player_sheets_sub_color_green">Green</string>
   <string name="player_sheets_sub_color_blue">Blue</string>
@@ -1465,6 +1466,17 @@
   <string name="media_info_stat_bit_depth">Bit depth</string>
   <string name="media_info_stat_channels">Channels</string>
   <string name="media_info_stat_sample_rate">Sample rate</string>
+  <string name="media_info_date_added">Added to media library</string>
+  <string name="media_info_date_created">Created</string>
+  <string name="media_info_date_taken">Date taken</string>
+  <string name="media_info_date_modified">Last modified</string>
+  <string name="media_info_downloaded_from">Downloaded from</string>
+  <string name="media_info_saved_by">Saved by</string>
+  <string name="media_info_artwork_title">Artwork</string>
+  <string name="media_info_artwork_preview_failed">Couldn\'t display the artwork</string>
+  <string name="media_info_artwork_download">Download</string>
+  <string name="media_info_artwork_saved">Artwork saved</string>
+  <string name="media_info_artwork_save_failed">Couldn\'t save the artwork</string>
   <string name="audio_information_title">Audio information</string>
   <string name="audio_info_loading">Loading audio information…</string>
   <string name="audio_info_unavailable">Audio information is not available until the current track has loaded.</string>
@@ -1817,6 +1829,8 @@
   <string name="ytdlp_cookies_import_failed">Could not update cookies. Check file access and try again.</string>
   <string name="ytdlp_cookies_config_owned">mpv.conf or custom yt-dlp options control cookies. Update those options before retrying.</string>
   <string name="ui_aspect_ratio">Aspect Ratio</string>
+  <string name="ui_auto_crop_black_bars">Auto crop black bars</string>
+  <string name="ui_auto_crop_black_bars_summary">Sample a few frames and crop persistent encoded black bars.</string>
   <string name="ui_presets">Presets</string>
   <string name="ui_add_custom_ratio_e_g_16_9">Add Custom Ratio (e.g. 16:9)</string>
   <string name="ui_width">Width</string>
