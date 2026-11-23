@@ -11,7 +11,6 @@ package app.gyrolet.mpvrx.ui.player
 
 import android.content.ContentResolver
 import android.content.Context
-import android.graphics.Bitmap
 import android.media.AudioManager
 import android.view.Window
 import android.view.WindowManager
@@ -49,9 +48,6 @@ interface PlayerHost {
   fun currentPlayerLookupHints(): PlayerLookupHints = PlayerLookupHints()
 
   fun currentThumbnailSource(): String? = null
-
-  /** Main-safe copy of the picture on screen, scaled to fit [maxDimension]; null when none is shown. */
-  suspend fun captureVideoFrame(maxDimension: Int): Bitmap? = null
 
   fun isCurrentMediaKnownAudio(): Boolean = false
 
