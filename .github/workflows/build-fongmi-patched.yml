@@ -16,25 +16,16 @@ name: Build FongMi Patched (mpv DV sink fix)
 # mpvlibAndroid's copy of it) predates that rework and no longer applies;
 # neither is used any more.
 #
-# mpvlibAndroid's patch set has not caught up with the current FongMi/mpv
-# head: its pause-passthrough, OSD VAO and Dolby Vision patch files fail
-# there because the branch has absorbed their contents (the pause patch
-# only in part - its vo.c and command.c hunks are still missing). The
-# workflow therefore overrides those three files in the mpvlibAndroid
-# checkout with the fork-maintained copies in
-# native-patches/mpvlib-overrides/: the pause override keeps only the
-# hunks the branch still lacks, and the other two are written against the
-# branch's current tree so mpv.sh's reverse check recognises them as
-# already applied and skips them.
-#
-# The workflow also enables the output module in mpvlibAndroid's minimal
-# libxml2 build (scripts/libxml2.sh). That build exists for fontconfig and
-# omits the output module, whose header section declares
-# xmlDocDumpMemoryEnc; FFmpeg's TTML decoder calls that function, so
-# whenever the native prefix is rebuilt from scratch (a cache miss, e.g.
-# after the FongMi/FFmpeg head moves) the FFmpeg build fails in
-# libavformat. Enabling output keeps the TTML decoder and everything
-# else intact.
+# mpvlibAndroid has caught up with the FongMi/mpv head: the libxml2 output
+# module fix and the refreshed patch set (pause-passthrough reduced to the
+# hunks the branch still lacks; the OSD VAO and Dolby Vision patch files
+# dropped because the branch absorbed them) were merged upstream on
+# 2026-11-22 (mpvlibAndroid PRs #13 and #14). This workflow therefore uses
+# the mpvlibAndroid checkout exactly as upstream ships it. The fork-side
+# patch overrides and the libxml2 edit that bridged the gap were removed
+# on 2026-11-24 after a one-time check confirmed upstream's patch set
+# applies cleanly to the current FongMi/mpv head and its
+# pause-passthrough patch is identical to the fork's override copy.
 #
 # The native build mirrors Riteshp2001/mpvlibAndroid's own build.yml (branch
 # mpv-fongmi), restricted to arm64. FongMi/mpv is NOT pinned to a commit: the
@@ -119,24 +110,6 @@ jobs:
           ref: mpv-fongmi
           path: mpvlib
 
-      - name: Override stale mpvlibAndroid mpv patches
-        shell: bash
-        run: |
-          set -euo pipefail
-          # mpvlibAndroid's pause-passthrough, OSD VAO and Dolby Vision patch
-          # files no longer apply to the current FongMi/mpv head: the branch
-          # has absorbed their contents (the pause patch only in part). The
-          # fork-maintained copies either supply the hunks the branch still
-          # lacks (pause) or are recognised as already applied by mpv.sh's
-          # reverse check (OSD, Dolby Vision). See the header comment.
-          for name in mpv_android_pause_passthrough.patch \
-            mpv_osd_vao_fix.patch \
-            mpv_dolby_vision_output_mode.patch; do
-            cp "native-patches/mpvlib-overrides/$name" \
-              "mpvlib/buildscripts/patches/$name"
-            echo "overrode $name"
-          done
-
       - name: Restrict native build to arm64
         shell: bash
         run: |
@@ -158,18 +131,6 @@ jobs:
           sed -i 's/^ENABLE_X86_ARCH=true/ENABLE_X86_ARCH=false/' \
             mpvlib/buildscripts/include/build_config.sh
           grep '^ENABLE_X86_ARCH' mpvlib/buildscripts/include/build_config.sh
-
-      - name: Enable libxml2 output module for FFmpeg
-        shell: bash
-        run: |
-          set -euo pipefail
-          # mpvlibAndroid builds libxml2 minimal for fontconfig, without the
-          # output module; FFmpeg's TTML decoder needs it (see header).
-          # Must happen before "ci.sh export" so the recipe change feeds the
-          # cache identifier like the arm64 restriction above does.
-          sed -i 's/-D{push,reader,sax1,iso8859x,pattern}=enabled/-D{push,reader,sax1,iso8859x,pattern,output}=enabled/' \
-            mpvlib/buildscripts/scripts/libxml2.sh
-          grep 'Dminimum' mpvlib/buildscripts/scripts/libxml2.sh
 
       - name: Validate mpvlib version
         working-directory: mpvlib
