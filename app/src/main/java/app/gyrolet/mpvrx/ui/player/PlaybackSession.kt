@@ -1768,23 +1768,40 @@ internal fun userScriptsNeedReload(currentKey: String): Boolean {
     }
   }
 
+  /**
+   * One live scrub step (swipe or seekbar drag), sent the way mpv-android's seek gesture sends it:
+   * a single `seek` straight to libmpv. Event handling holds the native lock while it reads libmpv,
+   * and a step waiting behind that stalled the frame the finger was moving in, so a busy lock skips
+   * the step instead (false). The next move carries a newer target, and the caller sends the final
+   * target once the finger lifts. The end-of-file bookkeeping reads only run at end of file.
+   */
+  fun scrubSeek(target: Double): Boolean {
+    if (!target.isFinite() || !nativeLock.tryLock()) return false
+    try {
+      if (!nativeCoreReady) return false
+      val command = arrayOf("seek", target.toString(), "absolute")
+      // The observed flag, not a native read; an unknown value takes the full path.
+      val preparedCommand =
+        if (propBoolean["eof-reached"].value == false) {
+          loadedAudiobookEnded = false
+          command
+        } else {
+          prepareSeekCommandLocked(command)
+        }
+      MPVLib.command(*preparedCommand)
+      return true
+    } finally {
+      nativeLock.unlock()
+    }
+  }
+
   /** Executes a media-specific command only while its load generation is still current. */
   fun commandForGeneration(
     expectedGeneration: Long,
     vararg command: String,
-  ): Boolean = commandForGenerationIf(expectedGeneration, { true }, *command)
-
-  /**
-   * [commandForGeneration] for a request that a newer one can replace. [isCurrent] runs under the
-   * native lock, so a command another thread issues after replacing the request always lands last.
-   */
-  fun commandForGenerationIf(
-    expectedGeneration: Long,
-    isCurrent: () -> Boolean,
-    vararg command: String,
   ): Boolean =
     nativeLock.withLock {
-      if (!initialized || _state.value.generation != expectedGeneration || !isCurrent()) return@withLock false
+      if (!initialized || _state.value.generation != expectedGeneration) return@withLock false
       if (MpvConfigOverridePolicy.shouldSuppress(command)) return@withLock true
       val preparedCommand = prepareSeekCommandLocked(command)
       if (!handleAmbientShaderCommandLocked(preparedCommand)) MPVLib.command(*preparedCommand)

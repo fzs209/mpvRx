@@ -1479,10 +1479,12 @@ fun PlayerControls(
           ) {
             // A new DynamicSpeedControl value must update the existing AnimatedContent.
             // Re-keying the toast for each speed would recreate it, dropping the
-            // number's fade/scale/slide transition on every speed adjustment.
+            // number's fade/scale/slide transition on every speed adjustment. A swipe-seek chip
+            // likewise stays one chip when it freezes on the swipe's target.
             key(
               when (currentPlayerUpdate) {
                 PlayerUpdates.MultipleSpeed, is PlayerUpdates.DynamicSpeedControl -> PlayerUpdates.MultipleSpeed
+                is PlayerUpdates.HorizontalSeek -> PlayerUpdates.HorizontalSeek::class
                 else -> currentPlayerUpdate
               },
             ) {
@@ -1564,6 +1566,7 @@ fun PlayerControls(
                     HorizontalSeekPlayerUpdate(
                       startPosition = seekUpdate.startPosition,
                       position = viewModel.precisePosition,
+                      endPosition = seekUpdate.endPosition,
                     )
                   }
 

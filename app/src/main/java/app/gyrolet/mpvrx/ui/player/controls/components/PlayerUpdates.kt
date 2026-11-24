@@ -447,17 +447,21 @@ fun SeekPlayerUpdate(
 
 /**
  * The swipe-seek chip. It reads the swipe's live target itself and recomposes only when a shown
- * second changes, so a fast swipe never re-runs the player controls around it.
+ * second changes, so a fast swipe never re-runs the player controls around it. After the finger
+ * lifts it keeps [endPosition], the swipe's last target, like the text it replaced.
  */
 @Composable
 fun HorizontalSeekPlayerUpdate(
   startPosition: Float,
   position: StateFlow<Float>,
   modifier: Modifier = Modifier,
+  endPosition: Float? = null,
 ) {
   val positionState = position.collectAsState()
-  val seconds by remember { derivedStateOf { positionState.value.toInt() } }
-  val deltaSeconds by remember(startPosition) { derivedStateOf { (positionState.value - startPosition).toInt() } }
+  val seconds by remember(endPosition) { derivedStateOf { (endPosition ?: positionState.value).toInt() } }
+  val deltaSeconds by remember(startPosition, endPosition) {
+    derivedStateOf { ((endPosition ?: positionState.value) - startPosition).toInt() }
+  }
   val currentTime = remember(seconds) { formatSeekTime(seconds) }
   val seekDelta =
     remember(deltaSeconds) {
