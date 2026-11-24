@@ -181,6 +181,7 @@ enum class Sheets {
   AudiobookRewind,
   AudiobookSleepTimer,
   MediaInfo,
+  AudioOutput,
 }
 
 enum class Panels {
@@ -213,9 +214,14 @@ sealed class PlayerUpdates {
     val secondary: Boolean = false,
   ) : PlayerUpdates()
 
+  /**
+   * A horizontal swipe seek, published once when the swipe starts. The chip reads the live target
+   * from [PlayerViewModel.precisePosition], so finger moves never replace the player update; once the
+   * finger lifts, [endPosition] keeps it on the swipe's last target.
+   */
   data class HorizontalSeek(
-    val currentTime: String,
-    val seekDelta: String,
+    val startPosition: Float,
+    val endPosition: Float? = null,
   ) : PlayerUpdates()
 
   data class ShowText(

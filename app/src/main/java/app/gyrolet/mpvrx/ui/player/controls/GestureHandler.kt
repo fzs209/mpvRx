@@ -74,6 +74,8 @@ private val holdSpeedPresets = listOf(0.5f, 1f, 1.5f, 2f, 2.5f, 3f, 3.5f, 4f)
 private const val SPEED_HOLD_INTENT_THRESHOLD_MS = 250L
 private const val MULTI_TAP_SEEK_TIMEOUT_MS = 1_200L
 private const val CENTER_SINGLE_TAP_VERTICAL_EDGE_FRACTION = 0.35f
+// How long a seek chip stays up after the finger lifts.
+private const val HORIZONTAL_SEEK_UPDATE_LINGER_MS = 300L
 
 private data class TapSeekFeedback(
   val region: String,
@@ -277,6 +279,8 @@ fun GestureHandler(
     if (anyPanelShown && !allowGesturesInPanels) {
       if (viewModel.panelShown.value != Panels.None) viewModel.panelShown.update { Panels.None }
       if (externalPanelShown) onDismissExternalPanel()
+      // The tap only closed the panel; the controls stay hidden behind it.
+      if (!viewModel.areControlsLocked.value) return
     }
     if (viewModel.areControlsLocked.value || !viewModel.controlsShown.value) {
       viewModel.showControls()
@@ -1605,7 +1609,9 @@ fun GestureHandler(
                         // Don't conflict with long press
                         !isDynamicSpeedControlActive &&
                         // Don't conflict with speed control
-                        (!anyPanelShown || allowGesturesInPanels)
+                        (!anyPanelShown || allowGesturesInPanels) &&
+                        // Like mpv-android, a swipe cannot seek media of unknown length.
+                        (duration ?: 0) > 0
                       ) {
                         if (claimGesture(GestureOwner.HORIZONTAL_SEEK)) {
                           gestureType = "horizontal_seek"
@@ -1616,6 +1622,7 @@ fun GestureHandler(
                             ?: position?.toFloat()
                             ?: 0f
                           pendingSeekPosition = initialVideoPosition
+                          viewModel.showHorizontalSeekUpdate(initialVideoPosition)
 
                           change.consume()
                         }
@@ -1630,24 +1637,8 @@ fun GestureHandler(
                         viewModel.gestureSeekTo(clampedPosition)
                         pendingSeekPosition = clampedPosition
 
-                        // Format and display time position updates
-                        val currentPos = clampedPosition.toInt()
-                        val seekDelta = (clampedPosition - initialVideoPosition).toInt()
-
-                        val currentTimeStr = formatSeekTime(currentPos)
-
-                        // Format seek delta with +/- prefix
-                        val deltaStr =
-                          if (seekDelta >= 0) {
-                            "+${formatSeekTime(seekDelta)}"
-                          } else {
-                            "-${formatSeekTime(-seekDelta)}"
-                          }
-
-                        // Use PlayerUpdates system like zoom updates
-                        viewModel.playerUpdate.update {
-                          PlayerUpdates.HorizontalSeek(currentTimeStr, deltaStr)
-                        }
+                        // The chip reads the target from the ViewModel. Replacing the player update
+                        // with new text on every move re-ran the whole controls tree mid-swipe.
 
                         change.consume()
                       }
@@ -1669,14 +1660,17 @@ fun GestureHandler(
               if (gestureType == "subtitle_dialog_seek") viewModel.setSubtitleGestureHighlight(false)
               // Also runs on cancellation, so the seekbar never stays detached from playback.
               if (gestureType == "horizontal_seek") {
+                // Keep the chip visible briefly after the gesture settles, on the swipe's target. The
+                // ViewModel owns the delay, so the chip cannot outlive a cancelled or disposed handler.
+                viewModel.dismissHorizontalSeekUpdate(HORIZONTAL_SEEK_UPDATE_LINGER_MS)
                 viewModel.finishGestureSeek(pendingSeekPosition.takeIf { hasStartedSeeking })
               }
             }
 
-            if (hasStartedSeeking) {
+            if (hasStartedSeeking && gestureType == "subtitle_dialog_seek") {
               // Keep the chip visible briefly after the gesture settles.
               coroutineScope.launch {
-                delay(300)
+                delay(HORIZONTAL_SEEK_UPDATE_LINGER_MS)
                 viewModel.playerUpdate.update { PlayerUpdates.None }
               }
             }
@@ -1704,15 +1698,3 @@ fun calculateNewVerticalGestureValue(
   newY: Float,
   sensitivity: Float,
 ): Float = originalValue + ((startingY - newY) * sensitivity)
-
-private fun formatSeekTime(seconds: Int): String {
-  val absSeconds = kotlin.math.abs(seconds)
-  val hours = absSeconds / 3600
-  val minutes = (absSeconds % 3600) / 60
-  val secs = absSeconds % 60
-  return if (hours > 0) {
-    String.format("%d:%02d:%02d", hours, minutes, secs)
-  } else {
-    String.format("%02d:%02d", minutes, secs)
-  }
-}

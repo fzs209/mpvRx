@@ -56,7 +56,6 @@ class UpdateManager(
       getLatestRelease(
         when (channel) {
           AppUpdateChannel.STABLE -> STABLE_RELEASE_URL
-          AppUpdateChannel.PREVIEW -> PREVIEW_RELEASE_URL
           AppUpdateChannel.EXPERIMENTAL -> EXPERIMENTAL_RELEASE_URL
         },
         allowMissing = channel == AppUpdateChannel.EXPERIMENTAL,
@@ -83,7 +82,7 @@ class UpdateManager(
           val currentVersion = BuildConfig.VERSION_NAME.substringBefore('-')
           isNewerVersion(release.tagName.removePrefix("v"), currentVersion)
         }
-        AppUpdateChannel.PREVIEW, AppUpdateChannel.EXPERIMENTAL -> isNewerCiBuild(release, channel)
+        AppUpdateChannel.EXPERIMENTAL -> isNewerExperimentalBuild(release)
       }
 
     return if (isNewer) {
@@ -94,20 +93,15 @@ class UpdateManager(
   }
 
   /**
-   * Preview and experimental feeds both publish the newest CI build of this branch. Commit counts
-   * order builds, but an amended or force-pushed branch publishes a different commit at the same
+   * The experimental feed publishes the newest CI build of this branch. Commit counts order
+   * builds, but an amended or force-pushed branch publishes a different commit at the same
    * count, which must still reach users who already run that count.
    */
-  private fun isNewerCiBuild(
-    release: Release,
-    channel: AppUpdateChannel,
-  ): Boolean {
-    val isPreview = channel == AppUpdateChannel.PREVIEW
-    val remoteBuild = (if (isPreview) release.previewBuildNumber else release.experimentalBuildNumber) ?: return false
+  private fun isNewerExperimentalBuild(release: Release): Boolean {
+    val remoteBuild = release.experimentalBuildNumber ?: return false
     if (remoteBuild != BuildConfig.GIT_COUNT) return remoteBuild > BuildConfig.GIT_COUNT
 
-    val alreadyOnChannel = if (isPreview) BuildConfig.IS_PREVIEW_BUILD else BuildConfig.IS_EXPERIMENTAL_BUILD
-    return !alreadyOnChannel || isDifferentCommit(release.commitSha)
+    return !BuildConfig.IS_EXPERIMENTAL_BUILD || isDifferentCommit(release.commitSha)
   }
 
   private fun isDifferentCommit(remoteSha: String?): Boolean {
@@ -121,9 +115,7 @@ class UpdateManager(
     when {
       release.isExperimental -> BuildConfig.IS_EXPERIMENTAL_BUILD &&
         release.experimentalBuildNumber == BuildConfig.GIT_COUNT && !isDifferentCommit(release.commitSha)
-      release.isPreview -> BuildConfig.IS_PREVIEW_BUILD &&
-        release.previewBuildNumber == BuildConfig.GIT_COUNT && !isDifferentCommit(release.commitSha)
-      else -> !BuildConfig.IS_PREVIEW_BUILD && !BuildConfig.IS_EXPERIMENTAL_BUILD &&
+      else -> !BuildConfig.IS_EXPERIMENTAL_BUILD &&
         release.tagName.removePrefix("v") == BuildConfig.VERSION_NAME.substringBefore('-')
     }
 
@@ -142,6 +134,9 @@ class UpdateManager(
       .putString(ignoredVersionKey(channel), version)
       .apply()
   }
+
+  private fun ignoredVersionKey(channel: AppUpdateChannel): String =
+    "ignored_version_${channel.name.lowercase()}"
 
   private suspend fun getLatestRelease(
     url: String,
@@ -173,9 +168,6 @@ class UpdateManager(
     }
     return false
   }
-
-  private fun ignoredVersionKey(channel: AppUpdateChannel): String =
-    "ignored_version_${channel.name.lowercase()}"
 
   /** The exact APK this install would download: same distribution, and the same ABI package when known. */
   fun selectUpdateAsset(release: Release): Asset? {
@@ -258,8 +250,8 @@ class UpdateManager(
   private fun primaryDeviceAbi(): String? = Build.SUPPORTED_ABIS.firstOrNull()?.takeIf { it in APK_ABIS }
 
   /**
-   * CI rebuilds at the same commit count reuse asset names, so the published content hash keeps
-   * their downloads (and resumable partials) from being mistaken for one another.
+   * A re-uploaded asset can keep its name, so the published content hash keeps its downloads
+   * (and resumable partials) from being mistaken for one another.
    */
   private fun localApkFile(asset: Asset): File {
     val name =
@@ -446,7 +438,6 @@ class UpdateManager(
 
   private companion object {
     const val STABLE_RELEASE_URL = "https://api.github.com/repos/Riteshp2001/mpvRx/releases/latest"
-    const val PREVIEW_RELEASE_URL = "https://riteshp2001.github.io/mpvRx/latest.json"
     const val EXPERIMENTAL_RELEASE_URL = "https://fzs209.github.io/mpvRx/experimental.json"
     const val LEGACY_IGNORED_VERSION_KEY = "ignored_version"
     const val PART_SUFFIX = ".part"

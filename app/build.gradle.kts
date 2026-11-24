@@ -55,7 +55,9 @@ val isBundleBuild =
 val releaseVersionCode = 305
 val versionCodeBandSize = 10_000
 val stableVersionCode = releaseVersionCode * versionCodeBandSize + (versionCodeBandSize - 1)
-val previewVersionCode =
+// Experimental builds sit in the next band, ordered by commit count, so a stable release, an
+// experimental build and a newer experimental build always upgrade in that order.
+val experimentalVersionCode =
   (releaseVersionCode + 1) * versionCodeBandSize +
     (getCommitCount().toIntOrNull() ?: 1).coerceIn(1, versionCodeBandSize - 2)
 
@@ -90,8 +92,7 @@ android {
     applicationId = "com.fzs209.mpvrx"
     minSdk = 26
     targetSdk = 36
-    // Stable occupies the top of its version band. Preview uses the next band's commit-count
-    // offset, so Stable -> Preview -> newer Preview -> next Stable is always an Android upgrade.
+    // Stable occupies the top of its version band.
     versionCode = stableVersionCode
     versionName = "3.1.1"
 
@@ -238,7 +239,6 @@ android {
 
   buildTypes {
     named("release") {
-      buildConfigField("boolean", "IS_PREVIEW_BUILD", "false")
       buildConfigField("boolean", "IS_EXPERIMENTAL_BUILD", isExperimentalBuild.toString())
       if (isExperimentalBuild) versionNameSuffix = "-exp.r${getCommitCount()}"
       isMinifyEnabled = true
@@ -254,16 +254,7 @@ android {
       }
     }
 
-    create("preview") {
-      initWith(getByName("release"))
-      signingConfig = signingConfigs.getByName("debug")
-      buildConfigField("boolean", "IS_PREVIEW_BUILD", "true")
-      buildConfigField("boolean", "IS_EXPERIMENTAL_BUILD", "false")
-      versionNameSuffix = "-beta.r${getCommitCount()}"
-    }
-
     named("debug") {
-      buildConfigField("boolean", "IS_PREVIEW_BUILD", "false")
       buildConfigField("boolean", "IS_EXPERIMENTAL_BUILD", "false")
       applicationIdSuffix = ".debug"
       versionNameSuffix = "-${getCommitCount()}"
@@ -345,12 +336,6 @@ androidComponents {
         output.enabled.set(false)
       }
 
-      val channelVersionCode =
-        if (variant.buildType == "preview" || (variant.buildType == "release" && isExperimentalBuild)) {
-          previewVersionCode
-        } else {
-          output.versionCode.orNull ?: stableVersionCode
-        }
       if (isPlayStoreRelease) {
         output.versionCode.set(providers.provider {
           check(runCommand("git rev-parse --is-shallow-repository") == "false") {
@@ -366,8 +351,10 @@ androidComponents {
           }
           playStoreVersionCode.toInt()
         })
+      } else if (variant.buildType == "release" && isExperimentalBuild) {
+        output.versionCode.set(experimentalVersionCode * 10 + (abiCodes[abi] ?: 0))
       } else {
-        output.versionCode.set(channelVersionCode * 10 + (abiCodes[abi] ?: 0))
+        output.versionCode.set((output.versionCode.orNull ?: stableVersionCode) * 10 + (abiCodes[abi] ?: 0))
       }
     }
   }

@@ -67,7 +67,6 @@ class UpdateViewModel(application: Application) : AndroidViewModel(application) 
     prefs.getString(UPDATE_CHANNEL_KEY, null)?.let(AppUpdateChannel::fromStoredValue)
       ?: when {
         BuildConfig.IS_EXPERIMENTAL_BUILD -> AppUpdateChannel.EXPERIMENTAL
-        BuildConfig.IS_PREVIEW_BUILD -> AppUpdateChannel.PREVIEW
         else -> AppUpdateChannel.STABLE
       },
   )
@@ -135,10 +134,10 @@ class UpdateViewModel(application: Application) : AndroidViewModel(application) 
     }
     if (!manual && _uiState.value.visible) return
     checkJob?.cancel()
-    val channel = _updateChannel.value
     if (manual) _uiState.update { it.copy(visible = true, checking = true, checkError = false, noUpdate = false) }
     checkJob = viewModelScope.launch {
       try {
+        val channel = _updateChannel.value
         val release = updateManager.checkForUpdate(channel, forceShow = manual)
         ensureActive()
         if (channel != _updateChannel.value || busy()) return@launch

@@ -14,7 +14,6 @@ import kotlinx.serialization.Serializable
 
 enum class AppUpdateChannel {
   STABLE,
-  PREVIEW,
   EXPERIMENTAL,
   ;
 
@@ -31,22 +30,12 @@ data class Release(
   @SerialName("body") val body: String,
   @SerialName("published_at") val publishedAt: String,
   @SerialName("assets") val assets: List<Asset>,
+  // GitHub releases have no channel; only records saved from CI feeds carry one.
   @SerialName("channel") val channel: String? = null,
   @SerialName("commit_count") val commitCount: Int? = null,
   @SerialName("commit_sha") val commitSha: String? = null,
   @SerialName("updated_at") val updatedAt: String? = null,
 ) {
-  val isPreview: Boolean
-    get() = channel.equals("preview", ignoreCase = true) || tagName.startsWith("preview-r")
-
-  val previewBuildNumber: Int?
-    get() =
-      if (isPreview) {
-        commitCount ?: PREVIEW_TAG_REGEX.find(tagName)?.groupValues?.getOrNull(1)?.toIntOrNull()
-      } else {
-        null
-      }
-
   val isExperimental: Boolean
     get() = channel.equals("experimental", ignoreCase = true) || tagName.equals("experimental", ignoreCase = true)
 
@@ -58,39 +47,27 @@ data class Release(
         null
       }
 
-  /** Preview and experimental feeds both describe one CI build of master; stable releases do not. */
-  private val ciChannelName: String?
-    get() =
-      when {
-        isExperimental -> "experimental"
-        isPreview -> "preview"
-        else -> null
-      }
-
-  private val ciBuildNumber: Int?
-    get() = experimentalBuildNumber ?: previewBuildNumber
-
-  // CI feeds are rolling, and an amended or force-pushed master republishes the same commit count,
-  // so the key carries the commit: ignoring one build must not ignore a different build at that count.
+  // The experimental feed is rolling, and an amended or force-pushed branch republishes the same
+  // commit count, so the key carries the commit: ignoring one build must not ignore a different
+  // build at that count.
   val updateKey: String
     get() {
-      val channelName = ciChannelName ?: return tagName
-      val buildNumber = ciBuildNumber ?: return tagName
+      if (!isExperimental) return tagName
+      val buildNumber = experimentalBuildNumber ?: return tagName
       val commit = commitSha?.trim()?.take(SHORT_SHA_LENGTH)?.takeIf { it.isNotEmpty() }
-      return listOfNotNull("$channelName-r$buildNumber", commit).joinToString("-")
+      return listOfNotNull("experimental-r$buildNumber", commit).joinToString("-")
     }
 
   // Old assets stay available during publication. Never select one from a different build.
   val updateAssets: List<Asset>
     get() {
-      val channelName = ciChannelName ?: return assets
-      val buildNumber = ciBuildNumber ?: return emptyList()
-      return assets.filter { it.name.startsWith("mpvRx-$channelName-r$buildNumber-", ignoreCase = true) }
+      if (!isExperimental) return assets
+      val buildNumber = experimentalBuildNumber ?: return emptyList()
+      return assets.filter { it.name.startsWith("mpvRx-experimental-r$buildNumber-", ignoreCase = true) }
     }
 
   companion object {
     private const val SHORT_SHA_LENGTH = 7
-    private val PREVIEW_TAG_REGEX = Regex("""(?:preview-)?r(\d+)""", RegexOption.IGNORE_CASE)
     private val BUILD_NUMBER_REGEX = Regex("""\br(\d+)\b""", RegexOption.IGNORE_CASE)
   }
 }
@@ -140,7 +117,7 @@ internal const val APK_VARIANT_PLAYSTORE = "playstore"
 /** ABI splits published next to the universal APK, matching the Android ABI names. */
 internal val APK_ABIS = listOf("arm64-v8a", "armeabi-v7a", "x86", "x86_64")
 
-/** Matches a dash-separated token in an asset name such as `mpvRx-preview-r1969-arm64-v8a.apk`. */
+/** Matches a dash-separated token in an asset name such as `mpvRx-arm64-v8a-v3.1.1.apk`. */
 internal fun String.hasApkAssetToken(token: String): Boolean =
   Regex(
     pattern = "(?:^|-)${Regex.escape(token)}(?:-|\\.apk$)",
