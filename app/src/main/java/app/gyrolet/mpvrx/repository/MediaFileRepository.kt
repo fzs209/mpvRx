@@ -16,6 +16,7 @@ import android.provider.MediaStore
 import android.util.Log
 import app.gyrolet.mpvrx.BuildConfig
 import app.gyrolet.mpvrx.database.MpvRxDatabase
+import app.gyrolet.mpvrx.domain.archive.ZipArchiveMedia
 import app.gyrolet.mpvrx.domain.browser.FileSystemItem
 import app.gyrolet.mpvrx.domain.browser.PathComponent
 import app.gyrolet.mpvrx.domain.media.model.Video
@@ -29,6 +30,7 @@ import app.gyrolet.mpvrx.utils.media.MediaInfoOps
 import app.gyrolet.mpvrx.utils.media.ScopedHiddenFolderScanner
 import app.gyrolet.mpvrx.utils.storage.FileTypeUtils
 import app.gyrolet.mpvrx.utils.storage.FolderViewScanner
+import app.gyrolet.mpvrx.utils.storage.IndexedMediaLibrary
 import app.gyrolet.mpvrx.utils.storage.INTERNAL_STORAGE_LABEL
 import app.gyrolet.mpvrx.utils.storage.MediaScanOptions
 import app.gyrolet.mpvrx.utils.storage.StorageVolumeUtils
@@ -113,6 +115,7 @@ object MediaFileRepository : KoinComponent {
     Log.d(TAG, "Clearing all caches (FolderViewScanner + TreeViewScanner)")
     FolderViewScanner.clearCache()
     TreeViewScanner.clearCache()
+    IndexedMediaLibrary.invalidate()
   }
 
   /** Invalidates only the album MediaStore snapshot, preserving tree and filesystem indexes. */
@@ -467,6 +470,37 @@ object MediaFileRepository : KoinComponent {
         throw cancelled
       } catch (e: Exception) {
         Log.e(TAG, "Error getting videos for bucket $bucketId", e)
+        emptyList()
+      }
+    }
+
+  /**
+   * Phase 1 indexed entry point, video list only. Serves a folder from the
+   * [IndexedMediaLibrary] (one full MediaStore query, grouped in memory)
+   * instead of a per-folder query. ZIP archives and SAF granted folders
+   * have no MediaStore path identity, so they fall back to the existing
+   * [getVideosInFolder] unchanged. Every other caller keeps using
+   * [getVideosInFolder]; nothing else moves to the index in this phase.
+   */
+  suspend fun getIndexedVideosInFolder(
+    context: Context,
+    bucketId: String,
+    forceReload: Boolean = false,
+    includeAudioOverride: Boolean? = null,
+    scope: HiddenScanScope = HiddenScanScope.FOLDERS,
+  ): List<Video> =
+    withContext(Dispatchers.IO) {
+      try {
+        if (ZipArchiveMedia.isBrowserPath(bucketId) || ScopedHiddenFolderScanner.isScopedFolder(bucketId)) {
+          return@withContext getVideosInFolder(context, bucketId, false, includeAudioOverride, scope)
+        }
+        val options = currentScanOptions(includeAudioOverride, scope)
+        IndexedMediaLibrary.ensureLoaded(context, options, forceReload)
+        IndexedMediaLibrary.getVideos(bucketId, options)
+      } catch (cancelled: CancellationException) {
+        throw cancelled
+      } catch (e: Exception) {
+        Log.e(TAG, "Error getting indexed videos for bucket $bucketId", e)
         emptyList()
       }
     }

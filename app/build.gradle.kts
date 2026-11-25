@@ -181,8 +181,14 @@ android {
 
     create("fongmi") {
       dimension = "distribution"
+      // BRANCH-ONLY (fix/indexed-video-list): test package that can coexist
+      // with the experimental build. REVERT BEFORE MERGING INTO fongmi-fixes:
+      // the applicationId, the app_name resValue and ENABLE_UPDATE_FEATURE
+      // below are branch-only and must not land on fongmi-fixes.
+      applicationId = "com.fzs209.mpvrx.indexed"
+      resValue("string", "app_name", "mpvRx-Indexed")
       buildConfigField("boolean", "IS_PLAY_STORE_BUILD", "false")
-      buildConfigField("boolean", "ENABLE_UPDATE_FEATURE", "true")
+      buildConfigField("boolean", "ENABLE_UPDATE_FEATURE", "false")
       buildConfigField("String", "UPDATE_APK_VARIANT", "\"fongmi\"")
       buildConfigField("boolean", "SCOPED_STORAGE_ONLY", "false")
       buildConfigField("boolean", "MPV_SUPPORTS_VULKAN", "true")

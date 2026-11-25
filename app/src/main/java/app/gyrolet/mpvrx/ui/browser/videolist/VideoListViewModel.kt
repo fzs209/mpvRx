@@ -30,10 +30,10 @@ import app.gyrolet.mpvrx.utils.media.MetadataRetrieval
 import app.gyrolet.mpvrx.utils.media.PlaybackStateEvents
 import app.gyrolet.mpvrx.utils.media.PlaybackStateOps
 import app.gyrolet.mpvrx.utils.storage.FolderViewScanner
+import app.gyrolet.mpvrx.utils.storage.IndexedMediaLibrary
 import app.gyrolet.mpvrx.utils.storage.VideoScanUtils
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -53,6 +53,10 @@ import org.koin.core.component.inject
 import java.io.File
 
 private const val SCOPED_PROBE_BATCH = 6
+
+// MediaStore reports 0 duration for these containers; the background probe
+// fixes them after the list shows (see probeDeferredMetadataInBackground).
+private val MEDIASTORE_DURATION_UNRELIABLE = setOf("ts", "mts", "m2ts")
 
 @Immutable
 data class VideoWithPlaybackInfo(
@@ -204,8 +208,10 @@ class VideoListViewModel(
     // Listen for global media library changes and refresh this list when they occur
     viewModelScope.launch(Dispatchers.IO) {
       MediaLibraryEvents.changes.collectLatest {
-        // A newly copied file may not be indexed in MediaStore yet.
-        loadVideos(forceFileSystemCheck = true)
+        // The index is stale now; drop it so the reload rebuilds it once
+        // instead of re-querying this folder and re-checking the filesystem.
+        IndexedMediaLibrary.invalidate()
+        loadVideos()
       }
     }
 
@@ -233,10 +239,11 @@ class VideoListViewModel(
     // Trigger media scan before loading to ensure MediaStore is up-to-date
     if (!ZipArchiveMedia.isBrowserPath(bucketId) && !ScopedHiddenFolderScanner.isScopedFolder(bucketId)) triggerMediaScan()
 
-    loadVideos(forceFileSystemCheck = true)
+    IndexedMediaLibrary.invalidate()
+    loadVideos(forceReload = true)
   }
 
-  private fun loadVideos(forceFileSystemCheck: Boolean = false) {
+  private fun loadVideos(forceReload: Boolean = false) {
     // Provider probing must never compete with listing; it restarts once the new list is shown.
     scopedMetadataJob?.cancel()
     // A newer request supersedes an unfinished one: bursts of media events used to stack full
@@ -244,12 +251,15 @@ class VideoListViewModel(
     loadVideosJob?.cancel()
     loadVideosJob = viewModelScope.launch(Dispatchers.IO) {
       try {
-        // First attempt to load videos (basic info from MediaStore)
+        // Phase 1 indexed listing: one full MediaStore query grouped in
+        // memory, so opening this folder is a map lookup, not a query. SAF
+        // and ZIP fall back to the per-folder scan inside
+        // getIndexedVideosInFolder, unchanged.
         var videoList =
-          MediaFileRepository.getVideosInFolder(
+          MediaFileRepository.getIndexedVideosInFolder(
             getApplication(),
             bucketId,
-            forceFileSystemCheck = forceFileSystemCheck,
+            forceReload = forceReload,
             includeAudioOverride = if (includeAudio) true else null,
           )
         if (includeAudio) {
@@ -265,22 +275,6 @@ class VideoListViewModel(
           videoList = MetadataRetrieval.restoreCachedContentMetadata(videoList, metadataCache)
         }
 
-        // ZIP entries need basic metadata even when optional metadata chips are disabled.
-        val archiveFolder = ZipArchiveMedia.isBrowserPath(bucketId)
-        if (!deferredMetadata &&
-          (archiveFolder || MetadataRetrieval.isVideoMetadataNeeded(browserPreferences))) {
-          Log.d(tag, "Enriching ${videoList.size} videos with metadata")
-          videoList =
-            MetadataRetrieval.enrichVideosIfNeeded(
-              context = getApplication(),
-              videos = videoList,
-              browserPreferences = browserPreferences,
-              metadataCache = metadataCache,
-            )
-        } else {
-          Log.d(tag, "Metadata extraction not required")
-        }
-
         // Check if folder became empty after having videos
         if (previousVideoCount > 0 && videoList.isEmpty()) {
           _videosWereDeletedOrMoved.value = true
@@ -293,52 +287,17 @@ class VideoListViewModel(
         // Update previous count
         previousVideoCount = videoList.size
 
-        if (videoList.isEmpty() && !archiveFolder && !ScopedHiddenFolderScanner.isScopedFolder(bucketId)) {
-          Log.d(tag, "No videos found for bucket $bucketId - attempting media rescan")
-          triggerMediaScan()
-          delay(1000)
-          var retryVideoList =
-            MediaFileRepository.getVideosInFolder(
-              getApplication(),
-              bucketId,
-              forceFileSystemCheck = true,
-              includeAudioOverride = if (includeAudio) true else null,
-            )
-          if (includeAudio) {
-            retryVideoList = retryVideoList.filter { it.isAudio }
-          }
-
-          // Enrich retry list if needed
-          if (!deferredMetadata && MetadataRetrieval.isVideoMetadataNeeded(browserPreferences)) {
-            retryVideoList =
-              MetadataRetrieval.enrichVideosIfNeeded(
-                context = getApplication(),
-                videos = retryVideoList,
-                browserPreferences = browserPreferences,
-                metadataCache = metadataCache,
-              )
-          }
-
-          // Update count after retry
-          if (previousVideoCount > 0 && retryVideoList.isEmpty()) {
-            _videosWereDeletedOrMoved.value = true
-          } else if (retryVideoList.isNotEmpty()) {
-            _videosWereDeletedOrMoved.value = false
-          }
-          previousVideoCount = retryVideoList.size
-
-          _videos.value = retryVideoList
-          loadPlaybackInfo(retryVideoList)
-          VideoListCache.save(getApplication(), cacheKey, retryVideoList)
-          if (deferredMetadata) probeDeferredMetadataInBackground(retryVideoList)
-        } else {
-          if (_videos.value != videoList) {
-            _videos.value = videoList
-            loadPlaybackInfo(videoList)
-          }
-          VideoListCache.save(getApplication(), cacheKey, videoList)
-          if (deferredMetadata) probeDeferredMetadataInBackground(videoList)
+        // Publish immediately: enrichment and .ts duration fixes run after
+        // the list is visible, in probeDeferredMetadataInBackground. An
+        // empty folder is just empty — no media rescan, no fixed wait, no
+        // forced re-query. A file arriving later fires MediaLibraryEvents,
+        // which invalidates the index and reloads this list.
+        if (_videos.value != videoList) {
+          _videos.value = videoList
+          loadPlaybackInfo(videoList)
         }
+        VideoListCache.save(getApplication(), cacheKey, videoList)
+        probeDeferredMetadataInBackground(videoList)
       } catch (e: kotlinx.coroutines.CancellationException) {
         // Superseded by a newer load (or the screen closed): keep the visible list.
         throw e
@@ -389,16 +348,24 @@ class VideoListViewModel(
     first.size == second.size && first.dateModified == second.dateModified
 
   /**
-   * Play Store documents and standard hidden files carry no metadata in the listing, so each file is
-   * probed here. This runs only after the list is already visible, one file at a time, publishing in
-   * small batches.
+   * Background metadata pass for every folder (phase 1 generalizes the old
+   * SAF / indexed-hidden-only probe). This runs only after the list is
+   * already visible, one file at a time, publishing in small batches.
+   * Pending work is the videos whose enabled chips still miss a field,
+   * plus .ts/.mts/.m2ts files with no duration: MediaStore reports 0 for
+   * those even when every chip is off, so their duration is fixed here
+   * instead of blocking the list. ZIP entries need no special case: the
+   * old blocking enrich call was a no-op for them (their URIs are excluded
+   * from probing and from the local-file batch), so they behave as before.
    */
   private fun probeDeferredMetadataInBackground(videos: List<Video>) {
     scopedMetadataJob?.cancel()
-    if (!MetadataRetrieval.isVideoMetadataNeeded(browserPreferences)) {
-      return
-    }
-    val pending = videos.filter { MetadataRetrieval.needsVideoMetadata(it, browserPreferences) }
+    val pending =
+      videos.filter { video ->
+        MetadataRetrieval.needsVideoMetadata(video, browserPreferences) ||
+          (video.duration <= 0L &&
+            video.path.substringAfterLast('.').lowercase() in MEDIASTORE_DURATION_UNRELIABLE)
+      }
     if (pending.isEmpty()) return
     scopedMetadataJob =
       viewModelScope.launch(Dispatchers.IO) {
