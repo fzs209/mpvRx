@@ -90,17 +90,17 @@ object IndexedMediaLibrary {
     context: Context,
     options: MediaScanOptions,
     force: Boolean = false,
-  ): Snapshot =
+  ) {
     withContext(Dispatchers.IO) {
       val optionsKey = options.cacheKey
       val current = snapshot
       if (!force && !isDirty && current != null && cachedOptionsKey == optionsKey) {
-        return@withContext current
+        return@withContext
       }
       cacheMutex.withLock {
         val locked = snapshot
         if (!force && !isDirty && locked != null && cachedOptionsKey == optionsKey) {
-          return@withLock locked
+          return@withLock
         }
         val started = SystemClock.elapsedRealtime()
         val loaded = loadAll(context, options)
@@ -113,9 +113,9 @@ object IndexedMediaLibrary {
             "${loaded.videosByParent.values.sumOf { it.size }} videos " +
             "in ${SystemClock.elapsedRealtime() - started}ms",
         )
-        loaded
       }
     }
+  }
 
   /**
    * Videos directly inside [folderPath], from the in-memory index only.
