@@ -1531,6 +1531,7 @@ fun GestureHandler(
             var gestureType: String? = null
             var hasStartedSeeking = false
             var initialVideoPosition = 0f
+            var seekOriginX = 0f
             var pendingSeekPosition: Float? = null
             // Use the sensitivity preference instead of hardcoded value
             val seekSensitivity = horizontalSwipeSensitivity
@@ -1604,6 +1605,9 @@ fun GestureHandler(
                             .takeIf { it.isFinite() && it >= 0f }
                             ?: position?.toFloat()
                             ?: 0f
+                          // Measure from here, so the thumb starts where playback is instead of
+                          // jumping by the distance it took to recognise the swipe.
+                          seekOriginX = currentPosition.x
                           pendingSeekPosition = initialVideoPosition
                           viewModel.showHorizontalSeekUpdate(initialVideoPosition)
 
@@ -1612,16 +1616,14 @@ fun GestureHandler(
                       }
 
                       if (gestureType == "horizontal_seek" && hasStartedSeeking) {
-                        // Calculate seek amount based on horizontal movement
-                        val seekAmount = deltaX * seekSensitivity
-                        val targetPosition = (initialVideoPosition + seekAmount).coerceAtLeast(0f)
-                        val maxDuration = duration?.toFloat() ?: 0f
-                        val clampedPosition = targetPosition.coerceAtMost(maxDuration)
-                        viewModel.gestureSeekTo(clampedPosition)
-                        pendingSeekPosition = clampedPosition
-
-                        // The chip reads the target from the ViewModel. Replacing the player update
-                        // with new text on every move re-ran the whole controls tree mid-swipe.
+                        // The ViewModel clamps to the media and an active A-B loop. Moves only update
+                        // the thumb; the chip and seeks follow from there, off this frame's work.
+                        val targetPosition =
+                          (initialVideoPosition + (currentPosition.x - seekOriginX) * seekSensitivity).coerceAtLeast(0f)
+                        if (targetPosition != pendingSeekPosition) {
+                          viewModel.gestureSeekTo(targetPosition)
+                          pendingSeekPosition = targetPosition
+                        }
 
                         change.consume()
                       }
@@ -1643,10 +1645,10 @@ fun GestureHandler(
               if (gestureType == "subtitle_dialog_seek") viewModel.setSubtitleGestureHighlight(false)
               // Also runs on cancellation, so the seekbar never stays detached from playback.
               if (gestureType == "horizontal_seek") {
-                // Keep the chip visible briefly after the gesture settles, on the swipe's target. The
-                // ViewModel owns the delay, so the chip cannot outlive a cancelled or disposed handler.
-                viewModel.dismissHorizontalSeekUpdate(HORIZONTAL_SEEK_UPDATE_LINGER_MS)
                 viewModel.finishGestureSeek(pendingSeekPosition.takeIf { hasStartedSeeking })
+                // Keep the chip visible briefly after the gesture settles. The ViewModel owns the
+                // delay, so the chip cannot outlive a cancelled or disposed handler.
+                viewModel.dismissHorizontalSeekUpdate(HORIZONTAL_SEEK_UPDATE_LINGER_MS)
               }
             }
 

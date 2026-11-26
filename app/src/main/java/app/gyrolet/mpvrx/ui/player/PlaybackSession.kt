@@ -14,7 +14,6 @@ import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
-import android.util.Log
 import android.view.Surface
 import androidx.appcompat.app.AppCompatDelegate
 import androidx.core.os.LocaleListCompat
@@ -31,6 +30,8 @@ import app.gyrolet.mpvrx.preferences.DecoderPreferences
 import app.gyrolet.mpvrx.preferences.PlayerPreferences
 import app.gyrolet.mpvrx.preferences.MpvConfigControlledFeatures
 import app.gyrolet.mpvrx.preferences.MpvConfigOverridePolicy
+import app.gyrolet.mpvrx.presentation.crash.AppLogging
+import app.gyrolet.mpvrx.utils.logging.Log
 import app.gyrolet.mpvrx.utils.media.HttpUtils
 import app.gyrolet.mpvrx.ui.player.ytdlp.YtdlpCookies
 import `is`.xyz.mpv.MPVLib
@@ -186,6 +187,7 @@ object PlaybackSession : MPVLib.EventObserver {
       enqueue(coreEvent = property == STATISTICS_STATE_PROPERTY) { PlaybackSession.eventProperty(property, value) }
 
     override fun logMessage(prefix: String, level: Int, text: String) {
+      AppLogging.recordMpvMessage(prefix, level, text)
       if (prefix != "ytdl_hook" || level > MPVLib.MpvLogLevel.MPV_LOG_LEVEL_ERROR ||
         !YtdlpCookies.isAuthenticationError(text)
       ) return
@@ -623,6 +625,10 @@ internal fun userScriptsNeedReload(currentKey: String): Boolean {
         try {
           MPVLib.create(context.applicationContext)
           coreCreated = true
+          // Logging first: mpv starts delivering messages inside init(), including mpv.conf and
+          // script errors, and drops them when no log observer is attached yet.
+          val observer = NativeEventObserver().also { nativeObserver = it }
+          MPVLib.addLogObserver(observer)
           MPVLib.setOptionString("config", "yes")
           MPVLib.setOptionString("config-dir", configDir)
           MPVLib.setOptionString("gpu-shader-cache-dir", cacheDir)
@@ -644,11 +650,7 @@ internal fun userScriptsNeedReload(currentKey: String): Boolean {
           MPVLib.setPropertyString("vo", "null")
           MPVLib.setPropertyString("force-window", "no")
           MPVLib.setPropertyString("idle", "yes")
-          NativeEventObserver().also { observer ->
-            nativeObserver = observer
-            MPVLib.addObserver(observer)
-            MPVLib.addLogObserver(observer)
-          }
+          MPVLib.addObserver(observer)
           reobserveTrackedProperties()
           observeProperties()
           initialized = true
@@ -1763,40 +1765,23 @@ internal fun userScriptsNeedReload(currentKey: String): Boolean {
     }
   }
 
-  /**
-   * One live scrub step (swipe or seekbar drag), sent the way mpv-android's seek gesture sends it:
-   * a single `seek` straight to libmpv. Event handling holds the native lock while it reads libmpv,
-   * and a step waiting behind that stalled the frame the finger was moving in, so a busy lock skips
-   * the step instead (false). The next move carries a newer target, and the caller sends the final
-   * target once the finger lifts. The end-of-file bookkeeping reads only run at end of file.
-   */
-  fun scrubSeek(target: Double): Boolean {
-    if (!target.isFinite() || !nativeLock.tryLock()) return false
-    try {
-      if (!nativeCoreReady) return false
-      val command = arrayOf("seek", target.toString(), "absolute")
-      // The observed flag, not a native read; an unknown value takes the full path.
-      val preparedCommand =
-        if (propBoolean["eof-reached"].value == false) {
-          loadedAudiobookEnded = false
-          command
-        } else {
-          prepareSeekCommandLocked(command)
-        }
-      MPVLib.command(*preparedCommand)
-      return true
-    } finally {
-      nativeLock.unlock()
-    }
-  }
-
   /** Executes a media-specific command only while its load generation is still current. */
   fun commandForGeneration(
     expectedGeneration: Long,
     vararg command: String,
+  ): Boolean = commandForGenerationIf(expectedGeneration, { true }, *command)
+
+  /**
+   * [commandForGeneration] for a request that a newer one can replace. [isCurrent] runs under the
+   * native lock, so a command another thread issues after replacing the request always lands last.
+   */
+  fun commandForGenerationIf(
+    expectedGeneration: Long,
+    isCurrent: () -> Boolean,
+    vararg command: String,
   ): Boolean =
     nativeLock.withLock {
-      if (!initialized || _state.value.generation != expectedGeneration) return@withLock false
+      if (!initialized || _state.value.generation != expectedGeneration || !isCurrent()) return@withLock false
       if (MpvConfigOverridePolicy.shouldSuppress(command)) return@withLock true
       val preparedCommand = prepareSeekCommandLocked(command)
       if (!handleAmbientShaderCommandLocked(preparedCommand)) MPVLib.command(*preparedCommand)

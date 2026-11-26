@@ -217,12 +217,10 @@ sealed class PlayerUpdates {
 
   /**
    * A horizontal swipe seek, published once when the swipe starts. The chip reads the live target
-   * from [PlayerViewModel.precisePosition], so finger moves never replace the player update; once the
-   * finger lifts, [endPosition] keeps it on the swipe's last target.
+   * from [PlayerViewModel.precisePosition], so finger moves never replace the player update.
    */
   data class HorizontalSeek(
     val startPosition: Float,
-    val endPosition: Float? = null,
   ) : PlayerUpdates()
 
   data class ShowText(

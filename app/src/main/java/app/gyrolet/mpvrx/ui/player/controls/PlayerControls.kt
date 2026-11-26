@@ -10,6 +10,7 @@
 package app.gyrolet.mpvrx.ui.player.controls
 
 import app.gyrolet.mpvrx.preferences.BrowserPreferences
+import app.gyrolet.mpvrx.utils.logging.Log
 import app.gyrolet.mpvrx.utils.storage.FileTypeUtils
 
 import app.gyrolet.mpvrx.ui.player.DeclaredPlaybackMediaKind
@@ -22,7 +23,6 @@ import android.media.AudioManager
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
-import android.util.Log
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.LocalActivity
 import androidx.compose.animation.AnimatedVisibility
@@ -1484,12 +1484,10 @@ fun PlayerControls(
           ) {
             // A new DynamicSpeedControl value must update the existing AnimatedContent.
             // Re-keying the toast for each speed would recreate it, dropping the
-            // number's fade/scale/slide transition on every speed adjustment. A swipe-seek chip
-            // likewise stays one chip when it freezes on the swipe's target.
+            // number's fade/scale/slide transition on every speed adjustment.
             key(
               when (currentPlayerUpdate) {
                 PlayerUpdates.MultipleSpeed, is PlayerUpdates.DynamicSpeedControl -> PlayerUpdates.MultipleSpeed
-                is PlayerUpdates.HorizontalSeek -> PlayerUpdates.HorizontalSeek::class
                 else -> currentPlayerUpdate
               },
             ) {
@@ -1571,7 +1569,6 @@ fun PlayerControls(
                     HorizontalSeekPlayerUpdate(
                       startPosition = seekUpdate.startPosition,
                       position = viewModel.precisePosition,
-                      endPosition = seekUpdate.endPosition,
                     )
                   }
 
