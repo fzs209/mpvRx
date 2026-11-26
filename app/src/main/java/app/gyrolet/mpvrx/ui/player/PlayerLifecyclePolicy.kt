@@ -116,11 +116,6 @@ internal object PlayerLifecyclePolicy {
       !isActivityUnavailable &&
       !isAlreadyInPip
 
-  fun shouldStartBackgroundPlaybackOnBack(
-    backgroundPlaybackEnabled: Boolean,
-    mediaReady: Boolean,
-  ): Boolean = backgroundPlaybackEnabled && mediaReady
-
   fun shouldKeepBackgroundPlaybackAliveOnDestroy(
     backgroundPlaybackEnabled: Boolean,
     backgroundPlaybackSessionActive: Boolean,

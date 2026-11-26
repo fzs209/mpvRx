@@ -22,7 +22,6 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
-import android.graphics.Color
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
@@ -41,10 +40,9 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
-import androidx.core.graphics.ColorUtils
 import androidx.media.MediaBrowserServiceCompat
+import androidx.media.app.NotificationCompat.MediaStyle
 import androidx.media.session.MediaButtonReceiver
-import app.gyrolet.mpvrx.BuildConfig
 import app.gyrolet.mpvrx.R
 import app.gyrolet.mpvrx.data.lyrics.LyricsTranslationService
 import app.gyrolet.mpvrx.database.entities.PlaybackStateEntity
@@ -53,7 +51,6 @@ import app.gyrolet.mpvrx.domain.playbackstate.repository.PlaybackStateRepository
 import app.gyrolet.mpvrx.domain.thumbnail.ThumbnailRepository
 import app.gyrolet.mpvrx.domain.thumbnail.getArtwork
 import app.gyrolet.mpvrx.domain.torrent.TorrentStreamingEngine
-import app.gyrolet.mpvrx.preferences.AdvancedPreferences
 import app.gyrolet.mpvrx.preferences.AudioPreferences
 import app.gyrolet.mpvrx.preferences.BrowserPreferences
 import app.gyrolet.mpvrx.preferences.GesturePreferences
@@ -79,9 +76,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
@@ -90,13 +87,13 @@ import kotlinx.coroutines.withContext
 import org.koin.core.component.KoinComponent
 import org.koin.core.component.inject
 import java.lang.ref.WeakReference
-import java.util.Locale
 import kotlin.math.abs
-import kotlin.math.ceil
 
 /**
- * Background playback service for mpv with MediaSession integration.
- * On Android 16+ (API 36), uses progress-centric notifications with chapter segment indicators.
+ * Background playback service for mpv with MediaSession integration, modelled on mpv-android's
+ * BackgroundPlaybackService: a mediaPlayback foreground service whose notification is a plain
+ * MediaStyle card tied to an active, fully described MediaSession. Android shows exactly that kind
+ * of notification without the POST_NOTIFICATIONS permission.
  */
 class MediaPlaybackService :
   MediaBrowserServiceCompat(),
@@ -108,9 +105,13 @@ class MediaPlaybackService :
     // Final state saves must outlive serviceScope, which is cancelled during teardown.
     private val persistenceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private const val NOTIFICATION_ID = 1
-    private const val NOTIFICATION_CHANNEL_ID = "mpvrx_playback_channel"
+
+    // A fresh channel: the old one may have been switched off by the user or an OEM shade while
+    // older notification styles were tested, and an app cannot switch a channel back on.
+    private const val NOTIFICATION_CHANNEL_ID = "mpvrx_media_playback"
+    private const val LEGACY_NOTIFICATION_CHANNEL_ID = "mpvrx_playback_channel"
+    private const val EXTRA_TRACKED_START = "app.gyrolet.mpvrx.extra.TRACKED_FOREGROUND_START"
     private const val PLAYBACK_STATE_SAVE_INTERVAL_MS = 5000L
-    private const val PROGRESS_NOTIFICATION_UPDATE_INTERVAL_MS = 2000L
     private const val MEDIA_NOTIFICATION_UPDATE_INTERVAL_MS = 1000L
     // Scrubbing jumps the position on every step. Jumps republish at most this often, the last one late.
     private const val POSITION_JUMP_PUBLISH_INTERVAL_MS = 500L
@@ -118,7 +119,6 @@ class MediaPlaybackService :
     private const val MAX_MEDIA_SESSION_QUEUE_ITEMS = 200
     private const val VIDEO_CONTENT_INTENT_REQUEST_CODE = 1100
     private const val AUDIO_CONTENT_INTENT_REQUEST_CODE = 1101
-    private val DEFAULT_ACCENT_COLOR = Color.rgb(214, 220, 228)
     const val ACTION_OPEN_PLAYER = "app.gyrolet.mpvrx.action.OPEN_PLAYER_FROM_NOTIFICATION"
     const val ACTION_NOTIFICATION_PREVIOUS = "app.gyrolet.mpvrx.action.NOTIFICATION_PREVIOUS"
     const val ACTION_NOTIFICATION_PLAY_PAUSE = "app.gyrolet.mpvrx.action.NOTIFICATION_PLAY_PAUSE"
@@ -134,10 +134,34 @@ class MediaPlaybackService :
     internal var thumbnail: Bitmap? = null
 
     @Volatile
-    private var isServiceRunning = false
-
-    @Volatile
     private var activeInstance: MediaPlaybackService? = null
+
+    // Main thread only. Android kills the app when a service started with startForegroundService()
+    // is stopped before it called startForeground(), so a stop that races a pending start waits
+    // for that start's onStartCommand, which always posts the notification first.
+    private var trackedStartsPending = 0
+    private var stopAfterTrackedStarts = false
+
+    /** Starts the service in the foreground; the caller must still be allowed to start one. */
+    internal fun requestForegroundStart(
+      context: Context,
+      intent: Intent,
+    ) {
+      ContextCompat.startForegroundService(context, Intent(intent).putExtra(EXTRA_TRACKED_START, true))
+      trackedStartsPending++
+      stopAfterTrackedStarts = false
+    }
+
+    /** Removes the notification now and stops the service once no foreground start is pending. */
+    internal fun requestStop(context: Context) {
+      activeInstance?.stopForegroundNotification()
+      if (trackedStartsPending > 0) {
+        stopAfterTrackedStarts = true
+      } else {
+        runCatching { context.stopService(Intent(context, MediaPlaybackService::class.java)) }
+          .onFailure { error -> Log.e(TAG, "Could not stop the playback service", error) }
+      }
+    }
 
     private val _foregroundActive = MutableStateFlow(false)
     internal val foregroundActive = _foregroundActive.asStateFlow()
@@ -145,17 +169,6 @@ class MediaPlaybackService :
     private fun publishForegroundActive() {
       _foregroundActive.value = isForegroundActive()
     }
-
-    /**
-     * True only while playback is detached from the foreground Activity.
-     *
-     * PlayerActivity historically used this query in onStart() as a signal to destroy the
-     * playback service. Keeping the physical service alive while the Activity owns the surface
-     * avoids tearing down and recreating the MediaSession/foreground notification on every
-     * notification tap. This mirrors the single long-lived notification-owner model used by
-     * MediaSessionService-style players.
-     */
-    fun isRunning(): Boolean = isServiceRunning && !activityForeground
 
     fun isForegroundActive(): Boolean =
       activeInstance?.let { service ->
@@ -190,22 +203,10 @@ class MediaPlaybackService :
         publishForegroundActive()
       }
 
-    internal fun relinquishMediaSessionToActivity() {
-      activeInstance?.deactivateMediaSession()
-    }
-
     internal fun takeAudioOwnershipForDetachedPlayback(): Boolean = activeInstance?.takeAudioOwnership() == true
 
-    private val inAppPlayerVisible = MutableStateFlow(false)
-
-    /**
-     * The in-app music sheet shows the full player while the service keeps owning playback. While
-     * it is visible, turning background playback off means "stop once I leave", as it does in
-     * PlayerActivity, instead of stopping the playback the user is looking at.
-     */
-    internal fun setInAppPlayerVisible(visible: Boolean) {
-      inAppPlayerVisible.value = visible
-    }
+    /** A play action by the user: takes focus back even from an app that only borrowed it. */
+    internal fun reclaimAudioFocusForPlay(): Boolean = activeInstance?.takeAudioOwnership(reclaim = true) == true
 
     // In-app full player transport. It shares the detached owner's queue handling, notification
     // updates and forced state saves, exactly like the notification and media-session controls.
@@ -236,7 +237,13 @@ class MediaPlaybackService :
       }
     }
 
-    internal fun isActivityHandoffInProgress(): Boolean = activeInstance?.handingBackToActivity == true
+    /**
+     * Only the window between a handoff request and the Activity reaching the foreground. Once the
+     * player is on screen it owns audio focus again, and a focus loss there (another app playing)
+     * must pause it instead of being mistaken for the service's handoff.
+     */
+    internal fun isActivityHandoffInProgress(): Boolean =
+      !activityForeground && activeInstance?.handingBackToActivity == true
 
     /** Releases every service-owned MPV access before an Activity destroys the global core. */
     internal fun prepareForMpvShutdown() {
@@ -249,20 +256,16 @@ class MediaPlaybackService :
     internal fun stopForTerminalDismissal() {
       val service = activeInstance
       if (service != null && !service.mpvAccessReleased) {
-        service.stopPlaybackAndService(force = true)
+        // The dismissed picture-in-picture player is already closing itself.
+        service.stopPlaybackAndService(force = true, closeVisiblePlayer = false)
       } else {
         PlaybackSession.stop(clearQueue = true)
       }
     }
 
-    internal fun stopExternalDisplayBackground() {
-      activeInstance?.let { service ->
-        service.stopForegroundNotification()
-        service.stopSelf()
-      }
-    }
-
-    fun createNotificationChannel(context: Context) {
+    private fun createNotificationChannel(context: Context) {
+      val manager = context.getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+      runCatching { manager.deleteNotificationChannel(LEGACY_NOTIFICATION_CHANNEL_ID) }
       val channel =
         NotificationChannel(
           NOTIFICATION_CHANNEL_ID,
@@ -273,17 +276,15 @@ class MediaPlaybackService :
           setShowBadge(false)
           enableLights(false)
           enableVibration(false)
+          setSound(null, null)
         }
-
-      (context.getSystemService(NOTIFICATION_SERVICE) as NotificationManager)
-        .createNotificationChannel(channel)
+      manager.createNotificationChannel(channel)
     }
   }
 
   private val binder = MediaPlaybackBinder()
   private lateinit var mediaSession: MediaSessionCompat
   private val playerPreferences: PlayerPreferences by inject()
-  private val advancedPreferences: AdvancedPreferences by inject()
   private val audioPreferences: AudioPreferences by inject()
   private val browserPreferences: BrowserPreferences by inject()
   private val thumbnailRepository: ThumbnailRepository by inject()
@@ -309,6 +310,7 @@ class MediaPlaybackService :
   private var mediaIdentifier = ""
   private var mediaTitle = ""
   private var mediaArtist = ""
+  private var mediaAlbum = ""
   private var mediaUri: String? = null
   private var activeArtworkUri: String? = null
   private var paused = false
@@ -336,16 +338,12 @@ class MediaPlaybackService :
   // Transport actions never change; creating a PendingIntent is a binder call per notification.
   private val transportIntents = java.util.concurrent.ConcurrentHashMap<String, PendingIntent>()
 
-  // Chapter & progress state for progress-centric notification
+  // Timeline and chapter state published through the MediaSession and the media notification.
   private var chapters: List<ChapterNode> = emptyList()
   private var currentChapterIndex: Int = -1
   @Volatile
   private var currentPositionSeconds: Double = 0.0
   private var mediaDurationSeconds: Double = 0.0
-  private var accentColor: Int = DEFAULT_ACCENT_COLOR
-  private var accentColorDim: Int = ColorUtils.setAlphaComponent(DEFAULT_ACCENT_COLOR, 90)
-  private var accentColorDone: Int = ColorUtils.blendARGB(DEFAULT_ACCENT_COLOR, Color.BLACK, 0.28f)
-  private var lastPaletteThumbnail: Bitmap? = null
   private var lastThumbnailSource: WeakReference<Bitmap>? = null
   private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
   private var playbackStateSaveJob: Job? = null
@@ -388,8 +386,6 @@ class MediaPlaybackService :
   private var noisyReceiverRegistered = false
   private var playbackObserversStarted = false
   private var handledEofGeneration: Long? = null
-  @Volatile
-  private var lastForegroundNotification: Notification? = null
   @Volatile
   private var foregroundReady = false
     set(value) {
@@ -452,6 +448,18 @@ class MediaPlaybackService :
 
   fun isForegroundReady(): Boolean = foregroundReady
 
+  // The bound full player, told when the notification is up and when its Close action ends playback.
+  private var playerActivity: WeakReference<PlayerActivity>? = null
+
+  internal fun attachPlayerActivity(activity: PlayerActivity) {
+    playerActivity = WeakReference(activity)
+    if (foregroundReady) activity.onPlaybackServiceForegroundReady()
+  }
+
+  internal fun detachPlayerActivity(activity: PlayerActivity) {
+    if (playerActivity?.get() === activity) playerActivity = null
+  }
+
   private fun updateExternalDisplayWakeLock(active: Boolean) {
     if (active) {
       if (externalDisplayWakeLock?.isHeld != true) {
@@ -487,28 +495,19 @@ class MediaPlaybackService :
     }.onFailure { error -> Log.e(TAG, "Could not update background playback wake lock", error) }
   }
 
-  private fun deactivateMediaSession() {
-    foregroundReady = false
-    if (::mediaSession.isInitialized) mediaSession.isActive = false
-  }
-
   override fun onCreate() {
     super.onCreate()
     Log.d(TAG, "Service created")
 
     activeInstance = this
-    isServiceRunning = true
     mpvAccessReleased = false
     handingBackToActivity = false
 
-    // Ensure notification channel exists before starting foreground service
+    // The channel must exist before startForeground(). Like mpv-android, nothing is posted here:
+    // onStartCommand fills the session first, so the very first card is already a complete media
+    // notification. A bind alone (the Activity attaching) never posts anything.
     createNotificationChannel(this)
-
-    // A bind can arrive before onStartCommand. Promote before session setup or any
-    // playback work so that cold starts also meet Android's foreground deadline.
-    if (!startForegroundNotification(useStartupNotification = true)) {
-      stopSelf()
-    }
+    setupMediaSession()
   }
 
   private fun startPlaybackObservers() {
@@ -575,6 +574,31 @@ class MediaPlaybackService :
     }
 
     serviceScope.launch {
+      // The media card mirrors the session: a file that finishes loading, buffers, or restores a
+      // paused position does not always emit a separate pause event. A stopped or failed detached
+      // session takes the notification down instead of leaving a dead card behind.
+      PlaybackSession.state
+        .map { Triple(it.generation, it.phase, it.paused to it.bufferingReason) }
+        .distinctUntilChanged()
+        .collect { (_, phase, _) ->
+          if (!foregroundReady) return@collect
+          val state = PlaybackSession.state.value
+          val ended =
+            phase == PlaybackPhase.STOPPING || phase == PlaybackPhase.UNINITIALIZED ||
+              (phase == PlaybackPhase.IDLE && state.currentItem == null) ||
+              (phase == PlaybackPhase.ERROR && canHandleDetachedTransport())
+          if (ended) {
+            stopForegroundNotification()
+            stopSelf()
+            return@collect
+          }
+          paused = state.paused
+          updateMediaSessionPlaybackState()
+          updateNotification()
+        }
+    }
+
+    serviceScope.launch {
       audioPreferences.ignoreAudioFocus.changes().distinctUntilChanged().collect { ignore ->
         if (mpvAccessReleased) return@collect
         if (ignore) {
@@ -588,24 +612,15 @@ class MediaPlaybackService :
     }
 
     serviceScope.launch {
-      combine(
-        PlaybackSession.videoBackgroundPlaybackEnabled,
-        audioPreferences.audioBackgroundPlayback.changes(),
-        PlaybackSession.state,
-        inAppPlayerVisible,
-      ) { _, audioEnabled, playbackState, inAppVisible ->
-        when {
-          inAppVisible -> true
-          playbackState.currentItem?.audiobook != null -> true
-          playbackState.currentItem?.declaredMediaKind() == DeclaredPlaybackMediaKind.AUDIO -> audioEnabled
-          playbackState.currentItem?.declaredMediaKind() == DeclaredPlaybackMediaKind.VIDEO ->
-            audioPreferences.getVideoBackgroundPlayback(PlaybackSession.videoBackgroundPlaybackId(playbackState))
-          usesAudioBackgroundPlayback -> audioEnabled
-          else -> audioPreferences.getVideoBackgroundPlayback(PlaybackSession.videoBackgroundPlaybackId(playbackState))
-        }
-      }.distinctUntilChanged().drop(1).collect { enabled ->
-        if (!enabled) {
-          Log.d(TAG, "Background playback disabled; stopping service")
+      // Audio always keeps playing in the background. Turning the video switch off ends a video
+      // that is already playing there.
+      playerPreferences.videoBackgroundPlayback.changes().distinctUntilChanged().drop(1).collect { enabled ->
+        val item = PlaybackSession.state.value.currentItem
+        val isAudio =
+          item != null && (item.audiobook != null || resolveNotificationIsAudio(item, usesAudioBackgroundPlayback))
+        // Only a video that already plays detached; a player on screen or a projected video keeps it.
+        if (!enabled && !isAudio && canHandleDetachedTransport() && externalDisplayWakeLock?.isHeld != true) {
+          Log.d(TAG, "Video background playback disabled; stopping service")
           stopDetachedPlaybackIfNeeded()
           stopForegroundNotification()
           stopSelf()
@@ -651,26 +666,13 @@ class MediaPlaybackService :
       }
     }
 
-    serviceScope.launch {
-      advancedPreferences.notificationStyle.changes().drop(1).collect {
-        if (!notificationsEnabled()) {
-          stopDetachedPlaybackIfNeeded()
-          stopForegroundNotification()
-          stopSelf()
-        } else {
-          updateMediaSessionPlaybackState()
-          syncMediaSessionVisibility()
-          updateNotification()
-        }
-      }
-    }
-
     // Only add MPV observer if MPV is initialized
     try {
       PlaybackSession.addObserver(this)
       PlaybackSession.observeProperty("pause", MPVLib.MpvFormat.MPV_FORMAT_FLAG)
       PlaybackSession.observeProperty("media-title", MPVLib.MpvFormat.MPV_FORMAT_STRING)
       PlaybackSession.observeProperty("metadata/by-key/artist", MPVLib.MpvFormat.MPV_FORMAT_STRING)
+      PlaybackSession.observeProperty("metadata/by-key/album", MPVLib.MpvFormat.MPV_FORMAT_STRING)
       PlaybackSession.observeProperty("time-pos", MPVLib.MpvFormat.MPV_FORMAT_DOUBLE)
       PlaybackSession.observeProperty("duration", MPVLib.MpvFormat.MPV_FORMAT_DOUBLE)
       PlaybackSession.observeProperty("speed", MPVLib.MpvFormat.MPV_FORMAT_DOUBLE)
@@ -693,151 +695,137 @@ class MediaPlaybackService :
     flags: Int,
     startId: Int,
   ): Int {
-    Log.d(TAG, "Service starting with startId: $startId")
-
-    // Acknowledge EVERY startForegroundService request, including repeated starts and stop
-    // actions. foregroundReady describes playback ownership, not the system's pending start.
-    // Reuse the last notification without querying MPV or rebuilding artwork on this path.
-    if (!startForegroundNotification(useStartupNotification = true)) {
-      stopForegroundNotification()
-      stopSelf(startId)
-      return START_NOT_STICKY
+    Log.d(TAG, "Service starting with startId: $startId action=${intent?.action}")
+    if (intent?.getBooleanExtra(EXTRA_TRACKED_START, false) == true && trackedStartsPending > 0) {
+      trackedStartsPending--
     }
-
-    if (!PlaybackSession.isInitialized) {
-      Log.w(TAG, "Ignoring playback service start without a live playback session")
-      stopForegroundNotification()
-      stopSelf(startId)
-      return START_NOT_STICKY
-    }
+    val stopRequested = stopAfterTrackedStarts && trackedStartsPending == 0
+    if (stopRequested) stopAfterTrackedStarts = false
 
     setupMediaSession()
-    startPlaybackObservers()
+    val session = PlaybackSession.state.value
+    val hasPlayback =
+      !stopRequested && !mpvAccessReleased && PlaybackSession.isInitialized && session.currentItem != null &&
+        session.phase in setOf(PlaybackPhase.LOADING, PlaybackPhase.READY, PlaybackPhase.BACKGROUND)
 
-    // Handle media button events
-    intent?.let {
-      when (it.action) {
-        ACTION_NOTIFICATION_PREVIOUS -> {
-          playPreviousFromSession()
-          if (foregroundReady) return START_NOT_STICKY
-        }
-        ACTION_NOTIFICATION_PLAY_PAUSE -> {
-          togglePlaybackFromNotification()
-          if (foregroundReady) return START_NOT_STICKY
-        }
-        ACTION_NOTIFICATION_NEXT -> {
-          playNextFromSession()
-          if (foregroundReady) return START_NOT_STICKY
-        }
-        ACTION_NOTIFICATION_SHUFFLE -> {
-          if (canHandleTransportAction()) {
-            val queueState = PlaybackSession.queue.value
-            PlaybackSession.setShuffleEnabled(!queueState.shuffleEnabled)
-            refreshTransportControls()
-          }
-          if (foregroundReady) return START_NOT_STICKY
-        }
-        ACTION_NOTIFICATION_FAVORITE -> {
-          toggleCurrentItemFavorite()
-          if (foregroundReady) return START_NOT_STICKY
-        }
-        ACTION_NOTIFICATION_MEDIA_FAVORITE -> {
-          toggleCurrentMediaNotificationFavorite()
-          if (foregroundReady) return START_NOT_STICKY
-        }
-        ACTION_NOTIFICATION_CLOSE,
-        ACTION_NOTIFICATION_STOP,
-        -> {
-          stopPlaybackAndService(force = true)
-          return START_NOT_STICKY
-        }
-        else -> MediaButtonReceiver.handleIntent(mediaSession, it)
-      }
+    if (hasPlayback) {
+      // Observers apply the current queue item to the session synchronously (Main.immediate), so
+      // title, artist, album, duration and artwork are in place before anything is posted.
+      startPlaybackObservers()
+      intent?.let(::applyStartExtras)
+      refreshPlaybackSnapshot()
 
-      val title = it.getStringExtra("media_title")
-      if (it.hasExtra(EXTRA_EXTERNAL_DISPLAY_ACTIVE)) {
-        updateExternalDisplayWakeLock(it.getBooleanExtra(EXTRA_EXTERNAL_DISPLAY_ACTIVE, false))
-      }
-      val artist = it.getStringExtra("media_artist")
-      val uri = it.getStringExtra("media_uri")
-      val identifier = it.getStringExtra("media_identifier")
-      if (it.hasExtra("audio_background_playback")) {
-        val isAudio = it.getBooleanExtra("audio_background_playback", false)
-        usesAudioBackgroundPlayback = isAudio
-        notificationIsAudio = isAudio
-      }
-
-      if (!title.isNullOrBlank()) {
-        mediaTitle = FileTypeUtils.stripExtension(title)
-        mediaArtist = artist ?: ""
-        Log.d(TAG, "Media info from intent: $mediaTitle")
-      }
-      if (!identifier.isNullOrBlank()) {
-        mediaIdentifier = identifier
-      }
-      if (!uri.isNullOrBlank()) {
-        mediaUri = uri
+      // Only take audio ownership for truly detached playback. A player on screen owns focus, and
+      // requesting it from here during a handoff would make that player see a focus loss.
+      val detached =
+        !session.paused && !session.surfaceAttached && !activityForeground && !handingBackToActivity
+      if (detached && !takeAudioOwnership()) {
+        paused = true
+        PlaybackSession.setPropertyBoolean("pause", true)
       }
     }
 
-    // Fallback: Read current state from MPV if not provided via intent
-    if (mediaTitle.isBlank()) {
-      mediaTitle = FileTypeUtils.stripExtension(PlaybackSession.getPropertyString("media-title") ?: "")
-      mediaArtist = PlaybackSession.getPropertyString("metadata/by-key/artist") ?: ""
-    }
-
-    paused = PlaybackSession.getPropertyBoolean("pause") == true
-    playbackSpeed =
-      PlaybackSession
-        .getPropertyDouble("speed")
-        ?.toFloat()
-        ?.takeIf { it.isFinite() && it > 0f }
-        ?: 1.0f
-    mediaDurationSeconds = runCatching { PlaybackSession.getPropertyDouble("duration") }.getOrNull() ?: 0.0
-    currentPositionSeconds = runCatching { PlaybackSession.getPropertyDouble("time-pos") }.getOrNull() ?: 0.0
-    currentChapterIndex = runCatching { PlaybackSession.getPropertyInt("chapter") }.getOrNull() ?: -1
-
-    // Only take audio ownership for a truly detached session. Notification re-entry first moves
-    // the process-wide session back to READY and/or marks a handoff. Re-requesting focus from the
-    // service in that window can make PlayerActivity receive AUDIOFOCUS_LOSS and pause the video.
-    val sessionState = PlaybackSession.state.value
-    val shouldTakeDetachedAudioFocus =
-      sessionState.phase == PlaybackPhase.BACKGROUND &&
-        !sessionState.surfaceAttached &&
-        !activityForeground &&
-        !handingBackToActivity
-    if (shouldTakeDetachedAudioFocus && !takeAudioOwnership()) {
-      PlaybackSession.setPropertyBoolean("pause", true)
-    }
-
-    refreshNotificationPalette()
-
-    updateMediaSessionMetadata()
-    updateMediaSessionPlaybackState()
-
-    if (!notificationsEnabled()) {
-      Log.d(TAG, "Notification style disabled, stopping playback service")
-      stopDetachedPlaybackIfNeeded()
-      stopForegroundNotification()
-      stopSelf()
-      return START_NOT_STICKY
-    }
-
+    // Every start reaches startForeground(), even one that ends at once: Android kills an app whose
+    // startForegroundService() is never answered. As in mpv-android, the session is active and
+    // fully described before the MediaStyle notification that points to it is posted, which is
+    // what lets Android show it without the notification permission.
+    publishSession(active = hasPlayback)
     if (!startForegroundNotification()) {
-      foregroundReady = false
-      mediaSession.isActive = false
+      stopForegroundNotification()
       stopSelf(startId)
       return START_NOT_STICKY
     }
-    foregroundReady = true
-    syncMediaSessionVisibility()
-    Log.d(TAG, "Foreground service started successfully")
+    if (!hasPlayback) {
+      // stopSelf(startId) keeps the service for a start that is already queued behind this one.
+      Log.d(TAG, "No playback to show (stopRequested=$stopRequested); ending the service")
+      stopForegroundNotification()
+      stopSelf(startId)
+      return START_NOT_STICKY
+    }
 
+    val becameReady = !foregroundReady
+    foregroundReady = true
+    if (becameReady) {
+      Log.d(TAG, "Media notification posted for ${session.currentItem?.stableId}")
+      playerActivity?.get()?.onPlaybackServiceForegroundReady()
+    }
+    intent?.takeIf { it.action != null }?.let(::dispatchStartAction)
     return START_NOT_STICKY
   }
 
+  /** Widget, notification and mini player buttons arrive as start intents with an action. */
+  private fun dispatchStartAction(intent: Intent) {
+    when (intent.action) {
+      ACTION_NOTIFICATION_PREVIOUS -> playPreviousFromSession()
+      ACTION_NOTIFICATION_PLAY_PAUSE -> togglePlaybackFromNotification()
+      ACTION_NOTIFICATION_NEXT -> playNextFromSession()
+      ACTION_NOTIFICATION_SHUFFLE -> {
+        if (canHandleTransportAction()) {
+          PlaybackSession.setShuffleEnabled(!PlaybackSession.queue.value.shuffleEnabled)
+          refreshTransportControls()
+        }
+      }
+      ACTION_NOTIFICATION_FAVORITE -> toggleCurrentItemFavorite()
+      ACTION_NOTIFICATION_MEDIA_FAVORITE -> toggleCurrentMediaNotificationFavorite()
+      ACTION_NOTIFICATION_CLOSE,
+      ACTION_NOTIFICATION_STOP,
+      -> stopPlaybackAndService(force = true)
+      else -> MediaButtonReceiver.handleIntent(mediaSession, intent)
+    }
+  }
+
+  /** Details the player sent with a start, used only while they describe the current item. */
+  private fun applyStartExtras(intent: Intent) {
+    if (intent.hasExtra(EXTRA_EXTERNAL_DISPLAY_ACTIVE)) {
+      updateExternalDisplayWakeLock(intent.getBooleanExtra(EXTRA_EXTERNAL_DISPLAY_ACTIVE, false))
+    }
+    val identifier = intent.getStringExtra("media_identifier")?.takeIf { it.isNotBlank() } ?: return
+    val current = PlaybackSession.state.value.currentItem ?: return
+    if (identifier != current.stableId) return
+    mediaIdentifier = identifier
+    intent.getStringExtra("media_uri")?.takeIf { it.isNotBlank() }?.let { mediaUri = it }
+    intent.getStringExtra("media_title")?.takeIf { it.isNotBlank() }?.let {
+      mediaTitle = FileTypeUtils.stripExtension(it)
+    }
+    intent.getStringExtra("media_artist")?.takeIf { it.isNotBlank() }?.let { mediaArtist = it }
+    if (intent.hasExtra("audio_background_playback")) {
+      val isAudio = intent.getBooleanExtra("audio_background_playback", false)
+      usesAudioBackgroundPlayback = isAudio
+      notificationIsAudio = isAudio
+    }
+  }
+
+  /** Reads the loaded file's state; main-thread reads use the session's cached properties. */
+  private fun refreshPlaybackSnapshot() {
+    val state = PlaybackSession.state.value
+    paused = state.paused
+    if (mediaTitle.isBlank()) {
+      mediaTitle = FileTypeUtils.stripExtension(PlaybackSession.getPropertyString("media-title").orEmpty())
+    }
+    if (mediaArtist.isBlank()) {
+      mediaArtist = PlaybackSession.getPropertyString("metadata/by-key/artist").orEmpty()
+    }
+    if (mediaAlbum.isBlank()) {
+      mediaAlbum = PlaybackSession.getPropertyString("metadata/by-key/album").orEmpty()
+    }
+    if (state.phase == PlaybackPhase.READY || state.phase == PlaybackPhase.BACKGROUND) {
+      playbackSpeed =
+        PlaybackSession.getPropertyDouble("speed")?.toFloat()?.takeIf { it.isFinite() && it > 0f } ?: playbackSpeed
+      PlaybackSession.getPropertyDouble("duration")?.takeIf { it.isFinite() && it > 0.0 }?.let { mediaDurationSeconds = it }
+      PlaybackSession.getPropertyDouble("time-pos")?.takeIf { it.isFinite() && it >= 0.0 }?.let { currentPositionSeconds = it }
+      currentChapterIndex = PlaybackSession.getPropertyInt("chapter")?.takeIf { it in chapters.indices } ?: currentChapterIndex
+    }
+  }
+
+  /** Metadata and state first, then activity: the order mpv-android's PlaybackStateCache uses. */
+  private fun publishSession(active: Boolean) {
+    updateMediaSessionMetadata()
+    updateMediaSessionPlaybackState()
+    if (::mediaSession.isInitialized) mediaSession.isActive = active
+  }
+
   @SuppressLint("ForegroundServiceType")
-  private fun startForegroundNotification(useStartupNotification: Boolean = false): Boolean =
+  private fun startForegroundNotification(): Boolean =
     try {
       val type =
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -845,14 +833,7 @@ class MediaPlaybackService :
         } else {
           0
         }
-      val notification =
-        if (useStartupNotification) {
-          lastForegroundNotification ?: buildStartupNotification()
-        } else {
-          buildNotification()
-        }
-      ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, type)
-      lastForegroundNotification = notification
+      ServiceCompat.startForeground(this, NOTIFICATION_ID, buildNotification(), type)
       true
     } catch (error: Exception) {
       Log.e(TAG, "Error starting foreground service", error)
@@ -882,6 +863,10 @@ class MediaPlaybackService :
     serviceScope.launch {
       val resolvedTitle = FileTypeUtils.stripExtension(title)
       val resolvedIdentifier = identifier?.takeIf { it.isNotBlank() }
+      // A late sync from the player (artwork decoding, a fetched stream title) must never label
+      // the item that the queue has moved on to.
+      val currentId = PlaybackSession.state.value.currentItem?.stableId
+      if (resolvedIdentifier != null && currentId != null && resolvedIdentifier != currentId) return@launch
       // A metadata-only Activity sync must not erase artwork already resolved for this queue item.
       // Item changes are cleared explicitly in applySessionItem before the next cover is loaded.
       val artworkChanged = thumbnail?.let(::replaceOwnedThumbnail) ?: false
@@ -897,7 +882,6 @@ class MediaPlaybackService :
       uri?.let { mediaUri = it }
       resolvedIdentifier?.let { mediaIdentifier = it }
       if (metadataChanged) {
-        refreshNotificationPalette()
         updateMediaSessionMetadata()
       }
       updateMediaSessionPlaybackState()
@@ -915,9 +899,8 @@ class MediaPlaybackService :
     val previous = thumbnail
     lastThumbnailSource = source?.let(::WeakReference)
     thumbnail = ownedCopy
-    if (lastPaletteThumbnail === previous) lastPaletteThumbnail = null
-    // Cached notifications can reference this bitmap; never repost recycled artwork.
-    lastForegroundNotification = null
+    // Notifications are rebuilt from current state on every post, so a recycled bitmap is never
+    // parcelled again.
     previous?.takeIf { it !== ownedCopy && !it.isRecycled }?.recycle()
     return previous !== ownedCopy
   }
@@ -927,7 +910,12 @@ class MediaPlaybackService :
     usesAudioBackgroundPlayback = isAudio
   }
 
-  fun takeAudioOwnership(): Boolean {
+  /**
+   * Takes audio focus so other apps pause while mpvRx plays. [reclaim] is for a play action by the
+   * user: it asks again even while another app has only borrowed focus (a short sound or the
+   * assistant), so mpvRx wins. During a phone call the request fails and playback waits.
+   */
+  fun takeAudioOwnership(reclaim: Boolean = false): Boolean {
     if (audioPreferences.ignoreAudioFocus.get()) {
       abandonAudioOwnership()
       return true
@@ -936,7 +924,7 @@ class MediaPlaybackService :
     // Do not request focus and bounce it back to PlayerActivity; that focus ping-pong is exactly
     // what can turn a notification tap into an unexpected pause.
     if (activityForeground || handingBackToActivity) return true
-    if (ownsAudioFocus) {
+    if (ownsAudioFocus && (hasAudioFocus || !reclaim)) {
       if (!hasAudioFocus) resumeAfterFocusGain = true
       return hasAudioFocus
     }
@@ -953,7 +941,13 @@ class MediaPlaybackService :
         .build()
         .also { audioFocusRequest = it }
     hasAudioFocus = audioManager.requestAudioFocus(request) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
-    ownsAudioFocus = hasAudioFocus
+    if (hasAudioFocus) {
+      ownsAudioFocus = true
+      resumeAfterFocusGain = false
+    } else if (ownsAudioFocus) {
+      // Still queued behind the borrower (a call); resume when it hands focus back.
+      resumeAfterFocusGain = true
+    }
     return hasAudioFocus
   }
 
@@ -1013,7 +1007,7 @@ class MediaPlaybackService :
   private fun handleMediaPlayAction(shouldPlay: Boolean) {
     when (gesturePreferences.mediaPlayGesture.get()) {
       SingleActionGesture.PlayPause -> {
-        if (shouldPlay && !PlaybackSession.state.value.surfaceAttached && !takeAudioOwnership()) return
+        if (shouldPlay && !PlaybackSession.state.value.surfaceAttached && !takeAudioOwnership(reclaim = true)) return
         PlaybackSession.setPropertyBoolean("pause", !shouldPlay)
         refreshTransportControls()
       }
@@ -1033,12 +1027,13 @@ class MediaPlaybackService :
     mediaIdentifier = item.stableId
     mediaTitle = FileTypeUtils.stripExtension(item.title.orEmpty()).ifBlank { getString(R.string.player_unknown_video) }
     mediaArtist = item.artist.orEmpty()
+    if (itemChanged) mediaAlbum = ""
     mediaUri = item.originalUri
     activeArtworkUri = item.artworkUri
     currentPositionSeconds = 0.0
     lastPublishedPositionSeconds = 0.0
-    mediaDurationSeconds = 0.0
-    paused = false
+    mediaDurationSeconds = item.durationSeconds?.takeIf { it > 0 }?.toDouble() ?: 0.0
+    paused = PlaybackSession.state.value.paused
     // Speed is core-wide and may remain unchanged across files, so no new property event is
     // guaranteed. Preserve the actual 2x/etc. rate used by Android's notification timeline.
     playbackSpeed =
@@ -1049,7 +1044,6 @@ class MediaPlaybackService :
       chapters = emptyList()
       currentChapterIndex = -1
       replaceOwnedThumbnail(null)
-      refreshNotificationPalette()
     }
     updateMediaSessionMetadata()
     updateMediaSessionPlaybackState()
@@ -1083,7 +1077,7 @@ class MediaPlaybackService :
       }
   }
 
-  /** Existing Progress-with-Chapters favorite path. Keep its behavior isolated and unchanged. */
+  /** The home-screen widget's favorite toggle. */
   private fun toggleCurrentItemFavorite() {
     if (favoriteActionJob?.isActive == true) return
     val item = PlaybackSession.queue.value.currentItem ?: return
@@ -1144,7 +1138,6 @@ class MediaPlaybackService :
       }
       val changed = replaceOwnedThumbnail(loaded)
       if (changed) {
-        refreshNotificationPalette()
         updateMediaSessionMetadata()
         updateNotification()
       }
@@ -1248,13 +1241,16 @@ class MediaPlaybackService :
   private fun togglePlaybackFromNotification() {
     if (!canHandleTransportAction()) return
     val shouldPlay = PlaybackSession.getPropertyBoolean("pause") != false
-    if (shouldPlay && !PlaybackSession.state.value.surfaceAttached && !takeAudioOwnership()) return
+    if (shouldPlay && !PlaybackSession.state.value.surfaceAttached && !takeAudioOwnership(reclaim = true)) return
     paused = !shouldPlay
     PlaybackSession.setPropertyBoolean("pause", paused)
     refreshTransportControls()
   }
 
-  private fun stopPlaybackAndService(force: Boolean = false) {
+  private fun stopPlaybackAndService(
+    force: Boolean = false,
+    closeVisiblePlayer: Boolean = true,
+  ) {
     if (!force && !canHandleTransportAction()) return
     handingBackToActivity = false
     schedulePlaybackStateSave(force = true)
@@ -1271,6 +1267,9 @@ class MediaPlaybackService :
     abandonAudioOwnership()
     stopForegroundNotification()
     stopSelf()
+    // Close from the notification shade while the full player is on screen closes that player too,
+    // instead of leaving it on an emptied session.
+    if (closeVisiblePlayer && activityForeground) playerActivity?.get()?.onPlaybackClosedFromMediaControls()
   }
 
   private fun stopDetachedPlaybackIfNeeded(expectedGeneration: Long? = null) {
@@ -1358,7 +1357,14 @@ class MediaPlaybackService :
             override fun onStop() {
               if (!canHandleTransportAction()) return
               Log.d(TAG, "onStop called")
-              stopPlaybackAndService()
+              // A controller's stop (car, watch, headset) pauses a player that is on screen; it
+              // ends only playback that runs without one. The notification's Close always ends.
+              if (activityForeground) {
+                PlaybackSession.setPropertyBoolean("pause", true)
+                refreshTransportControls()
+              } else {
+                stopPlaybackAndService()
+              }
             }
 
             override fun onSkipToNext() {
@@ -1418,45 +1424,31 @@ class MediaPlaybackService :
   }
 
   private fun canHandleDetachedTransport(): Boolean =
-    !mpvAccessReleased && !activityForeground && !handingBackToActivity
+    foregroundReady && !mpvAccessReleased && !activityForeground && !handingBackToActivity
 
   private fun canHandleTransportAction(): Boolean =
-    !mpvAccessReleased && (activityForeground || !handingBackToActivity)
-
-  private fun currentNotificationStyle(): NotificationStyle =
-    advancedPreferences.notificationStyle
-      .get()
-      .takeIf { it.isSupportedOn(Build.VERSION.SDK_INT) }
-      ?: NotificationStyle.Media
-
-  private fun notificationsEnabled(): Boolean = currentNotificationStyle() != NotificationStyle.None
-
-  private fun useProgressNotification(): Boolean = currentNotificationStyle() == NotificationStyle.Progress
-
-  /**
-  * A ProgressStyle notification and an active MediaSession are two independent System UI
-   * surfaces on Android 16. Publishing both makes one selected notification preference appear as
-   * two playback cards. Media Controls owns the MediaSession surface; Progress with Chapters owns
-   * only the foreground notification and keeps its transport actions on explicit PendingIntents.
-   */
-  private fun syncMediaSessionVisibility() {
-    if (!::mediaSession.isInitialized) return
-    mediaSession.isActive = foregroundReady && currentNotificationStyle() == NotificationStyle.Media
-  }
+    foregroundReady && !mpvAccessReleased && (activityForeground || !handingBackToActivity)
 
   private fun updateMediaSessionMetadata() {
+    if (!::mediaSession.isInitialized) return
     try {
       val title = mediaTitle.ifBlank { getString(R.string.player_unknown_video) }
+      val duration = sanitizedDurationMs()
       val metadataBuilder =
         MediaMetadataCompat
           .Builder()
           .putString(MediaMetadataCompat.METADATA_KEY_MEDIA_ID, mediaIdentifier)
           .putString(MediaMetadataCompat.METADATA_KEY_TITLE, title)
-          .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, mediaArtist)
           .putString(MediaMetadataCompat.METADATA_KEY_DISPLAY_TITLE, title)
-          .putLong(MediaMetadataCompat.METADATA_KEY_DURATION, sanitizedDurationMs())
+          .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, mediaArtist)
+          .putString(MediaMetadataCompat.METADATA_KEY_ALBUM, mediaAlbum)
+          .putString(MediaMetadataCompat.METADATA_KEY_DISPLAY_SUBTITLE, notificationText())
+          // -1 is the documented "unknown" length; 0 makes some shades draw an empty timeline.
+          .putLong(MediaMetadataCompat.METADATA_KEY_DURATION, duration.takeIf { it > 0L } ?: -1L)
 
-      thumbnail?.let {
+      // System media controls read METADATA_KEY_ART first, as mpv-android publishes it.
+      thumbnail?.takeUnless { it.isRecycled }?.let {
+        metadataBuilder.putBitmap(MediaMetadataCompat.METADATA_KEY_ART, it)
         metadataBuilder.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, it)
         metadataBuilder.putBitmap(MediaMetadataCompat.METADATA_KEY_DISPLAY_ICON, it)
       }
@@ -1468,24 +1460,32 @@ class MediaPlaybackService :
   }
 
   private fun updateMediaSessionPlaybackState() {
+    if (!::mediaSession.isInitialized) return
     try {
       val duration = sanitizedDurationMs()
+      // Like mpv-android, both play and pause are always offered alongside play/pause.
       var actions =
         PlaybackStateCompat.ACTION_PLAY_PAUSE or
+          PlaybackStateCompat.ACTION_PLAY or
+          PlaybackStateCompat.ACTION_PAUSE or
           PlaybackStateCompat.ACTION_STOP
-      actions = actions or if (paused) PlaybackStateCompat.ACTION_PLAY else PlaybackStateCompat.ACTION_PAUSE
       if (duration > 0L) actions = actions or PlaybackStateCompat.ACTION_SEEK_TO
       if (PlaybackSession.hasPrevious()) actions = actions or PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS
       if (PlaybackSession.hasNext()) actions = actions or PlaybackStateCompat.ACTION_SKIP_TO_NEXT
 
+      val session = PlaybackSession.state.value
       val state =
-        when (PlaybackSession.state.value.phase) {
+        when (session.phase) {
           PlaybackPhase.LOADING, PlaybackPhase.INITIALIZING -> PlaybackStateCompat.STATE_BUFFERING
           PlaybackPhase.UNINITIALIZED -> PlaybackStateCompat.STATE_NONE
           PlaybackPhase.IDLE, PlaybackPhase.STOPPING -> PlaybackStateCompat.STATE_STOPPED
           PlaybackPhase.ERROR -> PlaybackStateCompat.STATE_ERROR
           PlaybackPhase.READY, PlaybackPhase.BACKGROUND ->
-            if (paused) PlaybackStateCompat.STATE_PAUSED else PlaybackStateCompat.STATE_PLAYING
+            when {
+              paused -> PlaybackStateCompat.STATE_PAUSED
+              session.isBuffering -> PlaybackStateCompat.STATE_BUFFERING
+              else -> PlaybackStateCompat.STATE_PLAYING
+            }
         }
       if (
         state == PlaybackStateCompat.STATE_STOPPED ||
@@ -1503,7 +1503,7 @@ class MediaPlaybackService :
           .setActions(actions)
           .setActiveQueueItemId(activeQueueItemId)
           .setState(state, positionMs, stateSpeed, updatedAt)
-      if (actions != 0L && currentNotificationStyle() == NotificationStyle.Media) {
+      if (actions != 0L) {
         val favoriteLabel = favoriteActionLabel()
         stateBuilder.addCustomAction(
           PlaybackStateCompat.CustomAction
@@ -1526,8 +1526,7 @@ class MediaPlaybackService :
   }
 
   /** Android 13+ media controls render and advance Media-style progress from the session. */
-  private fun systemAdvancesMediaPosition(): Boolean =
-    Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && currentNotificationStyle() == NotificationStyle.Media
+  private fun systemAdvancesMediaPosition(): Boolean = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
 
   /** True once the system's extrapolated position is off, e.g. after a stall or a speed change. */
   private fun sessionPositionDrifted(now: Long): Boolean {
@@ -1536,19 +1535,14 @@ class MediaPlaybackService :
     return abs(currentPositionSeconds - extrapolated) > MEDIA_SESSION_DRIFT_TOLERANCE_SECONDS
   }
 
+  @SuppressLint("MissingPermission") // MediaStyle + session token is exempt from POST_NOTIFICATIONS.
   private fun updateNotification() {
-    if (!notificationsEnabled()) {
-      stopForegroundNotification()
-      stopSelf()
-      return
-    }
     if (!foregroundReady) return
 
     try {
       val notificationManager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
-      val notification = buildNotification()
-      notificationManager.notify(NOTIFICATION_ID, notification)
-      lastForegroundNotification = notification
+      // MediaStyle tied to the active session: exempt from POST_NOTIFICATIONS, as in mpv-android.
+      notificationManager.notify(NOTIFICATION_ID, buildNotification())
       lastNotificationUpdateTime = SystemClock.elapsedRealtime()
       lastPublishedPositionSeconds = currentPositionSeconds
     } catch (e: Exception) {
@@ -1573,25 +1567,6 @@ class MediaPlaybackService :
   }
 
   // ==================== Notification Builders ====================
-
-  private fun buildStartupNotification(): Notification =
-    NotificationCompat
-      .Builder(this, NOTIFICATION_CHANNEL_ID)
-      .setContentTitle(getString(R.string.notification_channel_name))
-      .setSmallIcon(R.drawable.ic_launcher_monochrome)
-      .setOnlyAlertOnce(true)
-      .setOngoing(true)
-      .setSilent(true)
-      .setCategory(NotificationCompat.CATEGORY_TRANSPORT)
-      .setPriority(NotificationCompat.PRIORITY_LOW)
-      .build()
-
-  private fun buildNotification(): Notification =
-    if (Build.VERSION.SDK_INT >= 36 && useProgressNotification()) {
-      buildModernNotification()
-    } else {
-      buildLegacyNotification()
-    }
 
   private fun buildContentIntent(): PendingIntent {
     val currentItem = PlaybackSession.queue.value.currentItem
@@ -1674,15 +1649,7 @@ class MediaPlaybackService :
       buildTransportIntent(ACTION_NOTIFICATION_NEXT, 1003),
     )
 
-  /** Existing Progress-with-Chapters favorite action. */
-  private fun favoriteAction() =
-    NotificationCompat.Action(
-      favoriteActionIcon(),
-      favoriteActionLabel(),
-      buildTransportIntent(ACTION_NOTIFICATION_FAVORITE, 1004),
-    )
-
-  /** Media notification favorite action, isolated from Progress-with-Chapters. */
+  /** Media notification favorite action. */
   private fun mediaFavoriteAction() =
     NotificationCompat.Action(
       favoriteActionIcon(),
@@ -1705,218 +1672,72 @@ class MediaPlaybackService :
       buildTransportIntent(ACTION_NOTIFICATION_CLOSE, 1006),
     )
 
-  private fun stopAction() =
-    NotificationCompat.Action(
-      Icons.Platform.Stop,
-      "Stop",
-      buildTransportIntent(ACTION_NOTIFICATION_STOP, 1006),
-    )
-
-  private fun chapterContentText(): String {
+  /** Chapter name, else "artist · album" (mpv-android's formatArtistAlbum), else nothing. */
+  private fun notificationText(): String? {
     val chapterName =
       if (currentChapterIndex >= 0) {
         chapters.getOrNull(currentChapterIndex)?.title?.takeIf { it.isNotBlank() }
       } else {
         null
       }
-    return chapterName ?: mediaArtist.ifBlank { getString(R.string.notification_playing) }
-  }
-
-  private fun chapterLabel(): String {
-    val chapterNumber = currentChapterIndex.takeIf { it in chapters.indices }?.plus(1)
-    return if (chapterNumber != null) {
-      getString(R.string.notification_chapter_counter, chapterNumber, chapters.size)
-    } else {
-      getString(R.string.notification_playing)
-    }
-  }
-
-  private fun playbackTimeText(): String {
-    val positionSeconds = sanitizedPositionMs() / 1000.0
-    val durationSeconds = sanitizedDurationMs() / 1000.0
-    if (durationSeconds <= 0.0) return formatSeconds(positionSeconds)
-    return getString(
-      R.string.notification_playback_progress,
-      formatSeconds(positionSeconds),
-      formatSeconds((durationSeconds - positionSeconds).coerceAtLeast(0.0)),
-    )
-  }
-
-  private fun refreshNotificationPalette() {
-    val currentThumbnail = thumbnail
-    if (currentThumbnail === lastPaletteThumbnail) return
-
-    // Extract dominant color from thumbnail for system-coherent appearance,
-    // falling back to a neutral tone that blends with the system's glassmorphic style
-    val dominantColor = currentThumbnail?.let { extractDominantColor(it) }
-    accentColor = dominantColor ?: DEFAULT_ACCENT_COLOR
-    accentColorDim = ColorUtils.setAlphaComponent(accentColor, 90)
-    accentColorDone = ColorUtils.blendARGB(accentColor, Color.BLACK, 0.28f)
-    lastPaletteThumbnail = currentThumbnail
-  }
-
-  private fun extractDominantColor(bitmap: Bitmap): Int? {
-    if (bitmap.isRecycled) return null
-    return try {
-      val scaled = Bitmap.createScaledBitmap(bitmap, 24, 24, true)
-      var r = 0L
-      var g = 0L
-      var b = 0L
-      var count = 0
-      for (x in 0 until scaled.width) {
-        for (y in 0 until scaled.height) {
-          val pixel = scaled.getPixel(x, y)
-          r += Color.red(pixel)
-          g += Color.green(pixel)
-          b += Color.blue(pixel)
-          count++
-        }
-      }
-      if (scaled != bitmap) scaled.recycle()
-      if (count == 0) return null
-      Color.rgb((r / count).toInt(), (g / count).toInt(), (b / count).toInt())
-    } catch (_: Exception) {
-      null
-    }
+    return chapterName
+      ?: listOf(mediaArtist, mediaAlbum).filter { it.isNotBlank() }.joinToString(" · ").takeIf { it.isNotEmpty() }
   }
 
   /**
-   * Android 16+ (API 36): Progress-centric notification with chapter segment indicators.
-   * This style uses explicit notification actions instead of also advertising a MediaSession,
-   * which would make System UI render a second playback card.
+   * The same notification mpv-android posts: a public, low-priority, ongoing MediaStyle card tied
+   * to the active session token, with previous/play-pause/next actions. Android exempts exactly this
+   * from POST_NOTIFICATIONS, so it shows without the permission. Nothing else is added on purpose:
+   * no silent group (setSilent), progress bar, sub text, category, delete intent or colour, which
+   * OEM shades may treat as an ordinary notification and hide while notifications are off.
    */
-  @androidx.annotation.RequiresApi(36)
-  private fun buildModernNotification(): Notification {
-    val (maximum, position) = notificationProgress()
-    val title = mediaTitle.ifBlank { getString(R.string.player_unknown_video) }
-    val timeline = playbackTimeText()
-    val chapterText = if (chapters.isEmpty()) chapterContentText() else "${chapterLabel()}: ${chapterContentText()}"
-    val isDark =
-      resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK ==
-        android.content.res.Configuration.UI_MODE_NIGHT_YES
-    val progressColor = getColor(if (isDark) android.R.color.system_accent1_200 else android.R.color.system_accent1_600)
-    val style = NotificationCompat.ProgressStyle().setStyledByProgress(true)
-    if (maximum <= 0) {
-      style.addProgressSegment(NotificationCompat.ProgressStyle.Segment(100).setColor(progressColor))
-      style.setProgressIndeterminate(true)
-    } else {
-      val boundaries =
-        buildList {
-          add(0)
-          chapters.forEach { chapter ->
-            chapter.time
-              .takeIf { it.isFinite() && it >= 1f && it < maximum }
-              ?.let { add(it.toInt()) }
-          }
-          add(maximum)
-        }.distinct().sorted()
-      boundaries.zipWithNext().forEach { (start, end) ->
-        style.addProgressSegment(NotificationCompat.ProgressStyle.Segment(end - start).setColor(progressColor))
-        if (start > 0) {
-          style.addProgressPoint(NotificationCompat.ProgressStyle.Point(start).setColor(progressColor))
-        }
-      }
-      style.setProgress(position)
-    }
-
+  private fun buildNotification(): Notification {
     val builder =
       NotificationCompat
         .Builder(this, NOTIFICATION_CHANNEL_ID)
-        .setSmallIcon(R.drawable.ic_launcher_monochrome)
-        .setContentTitle(title)
-        .setContentText(timeline)
-        .setSubText(chapterText)
-        .setLargeIcon(thumbnail?.takeUnless { it.isRecycled })
-        .setContentIntent(buildContentIntent())
-        .setDeleteIntent(buildTransportIntent(ACTION_NOTIFICATION_STOP, 1005))
-        .setOngoing(!paused)
-        .setRequestPromotedOngoing(!BuildConfig.IS_PLAY_STORE_BUILD && !paused)
-        .setAutoCancel(false)
-        .setSilent(true)
-        .setCategory(NotificationCompat.CATEGORY_TRANSPORT)
-        .setColor(DEFAULT_ACCENT_COLOR)
-        .setColorized(false)
-        .setPriority(NotificationCompat.PRIORITY_LOW)
         .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+        .setPriority(NotificationCompat.PRIORITY_LOW)
+        .setContentTitle(mediaTitle.ifBlank { getString(R.string.player_unknown_video) })
+        .setContentText(notificationText())
+        .setSmallIcon(R.drawable.ic_launcher_monochrome)
+        .setContentIntent(buildContentIntent())
+        .setOngoing(true)
         .setOnlyAlertOnce(true)
-        .setShowWhen(false)
-        .setStyle(style)
-        .addAction(prevAction())
-        .addAction(playPauseAction())
-        .addAction(nextAction())
-        .addAction(favoriteAction())
-        .addAction(stopAction())
-    if (maximum > 0) {
-      builder.setShortCriticalText("${position.toLong() * 100 / maximum}%")
+        .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
+
+    // Android 13+ media controls draw the session artwork; like mpv-android, the card carries no
+    // bitmap of its own there. Older templates still draw the large icon.
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+      thumbnail?.takeUnless { it.isRecycled }?.let { artwork -> builder.setLargeIcon(artwork) }
     }
 
-    return builder.build()
-  }
+    val compactActions = ArrayList<Int>(3)
+    var actionCount = 0
+    if (PlaybackSession.hasPrevious()) {
+      builder.addAction(prevAction())
+      compactActions += actionCount++
+    }
+    builder.addAction(playPauseAction())
+    compactActions += actionCount++
+    if (PlaybackSession.hasNext()) {
+      builder.addAction(nextAction())
+      compactActions += actionCount++
+    }
+    builder.addAction(mediaFavoriteAction())
+    builder.addAction(closeAction())
 
-  /**
-   * Pre-Android 16: Classic MediaStyle notification with linear progress bar and chapter text.
-   * Uses the system notification surface instead of forcing a colorized card tint.
-   */
-  private fun buildLegacyNotification(): Notification {
-    val (maximum, position) = notificationProgress()
-
-    return NotificationCompat
-      .Builder(this, NOTIFICATION_CHANNEL_ID)
-      .setContentTitle(mediaTitle.ifBlank { getString(R.string.player_unknown_video) })
-      .setContentText(chapterContentText())
-      .setSubText(playbackTimeText())
-      .setSmallIcon(R.drawable.ic_launcher_monochrome)
-      .setLargeIcon(thumbnail)
-      .setContentIntent(buildContentIntent())
-      .setDeleteIntent(buildTransportIntent(ACTION_NOTIFICATION_CLOSE, 1005))
-      .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-      .setOnlyAlertOnce(true)
-      .setOngoing(!paused)
-      .setAutoCancel(false)
-      .setSilent(true)
-      .setCategory(NotificationCompat.CATEGORY_TRANSPORT)
-      .setColor(DEFAULT_ACCENT_COLOR)
-      .setColorized(false)
-      .addAction(mediaFavoriteAction())
-      .addAction(prevAction())
-      .addAction(playPauseAction())
-      .addAction(nextAction())
-      .addAction(closeAction())
-      .setStyle(
-        androidx.media.app.NotificationCompat
-          .MediaStyle()
-          .setMediaSession(mediaSession.sessionToken)
-          .setShowActionsInCompactView(1, 2, 3),
-      ).setProgress(maximum, position, maximum <= 0)
-      .setPriority(NotificationCompat.PRIORITY_LOW)
-      .build()
-  }
-
-  /** Notification progress uses whole seconds to stay within the platform's Int-sized API. */
-  private fun notificationProgress(): Pair<Int, Int> {
-    val duration = mediaDurationSeconds.takeIf { it.isFinite() && it > 0.0 } ?: return 0 to 0
-    val maximum = ceil(duration).coerceAtMost(Int.MAX_VALUE.toDouble()).toInt().coerceAtLeast(1)
-    val position =
-      currentPositionSeconds
-        .takeIf { it.isFinite() && it > 0.0 }
-        ?.toLong()
-        ?.coerceIn(0L, maximum.toLong())
-        ?.toInt()
-        ?: 0
-    return maximum to position
+    val style =
+      MediaStyle()
+        .setMediaSession(mediaSession.sessionToken)
+        .setShowActionsInCompactView(*compactActions.toIntArray())
+    return builder.setStyle(style).build()
   }
 
   private fun stopForegroundNotification() {
-    lastForegroundNotification = null
     foregroundReady = false
     if (::mediaSession.isInitialized) mediaSession.isActive = false
     runCatching {
-      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-        stopForeground(STOP_FOREGROUND_REMOVE)
-      } else {
-        @Suppress("DEPRECATION")
-        stopForeground(true)
-      }
+      ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
     }.onFailure { error ->
       Log.e(TAG, "Error stopping foreground notification", error)
     }
@@ -1929,21 +1750,12 @@ class MediaPlaybackService :
     }
   }
 
-  private fun formatSeconds(seconds: Double): String {
-    val t = seconds.takeIf { it.isFinite() && it > 0.0 }?.toLong() ?: 0L
-    val h = t / 3600
-    val m = (t % 3600) / 60
-    val s = t % 60
-    return if (h > 0) {
-      String.format(Locale.US, "%d:%02d:%02d", h, m, s)
-    } else {
-      String.format(Locale.US, "%02d:%02d", m, s)
-    }
-  }
-
   // ==================== MPV Event Observers ====================
 
-  override fun eventProperty(property: String) {}
+  // A property mpv reports without a value (a tag the next file lacks) clears that field.
+  override fun eventProperty(property: String) {
+    if (property == "metadata/by-key/artist" || property == "metadata/by-key/album") eventProperty(property, "")
+  }
 
   override fun eventProperty(
     property: String,
@@ -1965,6 +1777,12 @@ class MediaPlaybackService :
       "pause" -> {
         serviceScope.launch {
           paused = value
+          // Any start of detached playback, including a new song that starts on its own, takes
+          // audio focus so other apps pause. Without it (a call) playback waits instead.
+          if (!value && canHandleDetachedTransport() && !hasAudioFocus && !takeAudioOwnership()) {
+            paused = true
+            PlaybackSession.setPropertyBoolean("pause", true)
+          }
           updateMediaSessionPlaybackState()
           updateNotification()
           schedulePlaybackStateSave(force = true)
@@ -2002,8 +1820,18 @@ class MediaPlaybackService :
       }
       "metadata/by-key/artist" -> {
         serviceScope.launch {
-          if (mediaArtist == value) return@launch
-          mediaArtist = value
+          // The queue item's artist (music library) stays when the file carries no tag.
+          val artist = value.ifBlank { PlaybackSession.state.value.currentItem?.artist.orEmpty() }
+          if (mediaArtist == artist) return@launch
+          mediaArtist = artist
+          updateMediaSessionMetadata()
+          updateNotification()
+        }
+      }
+      "metadata/by-key/album" -> {
+        serviceScope.launch {
+          if (mediaAlbum == value) return@launch
+          mediaAlbum = value
           updateMediaSessionMetadata()
           updateNotification()
         }
@@ -2019,12 +1847,7 @@ class MediaPlaybackService :
       "time-pos" -> {
         currentPositionSeconds = value.takeIf { it.isFinite() && it >= 0.0 } ?: 0.0
         val currentTime = SystemClock.elapsedRealtime()
-        val updateInterval =
-          if (useProgressNotification()) {
-            PROGRESS_NOTIFICATION_UPDATE_INTERVAL_MS
-          } else {
-            MEDIA_NOTIFICATION_UPDATE_INTERVAL_MS
-          }
+        val updateInterval = MEDIA_NOTIFICATION_UPDATE_INTERVAL_MS
         val elapsedSinceUpdate = (currentTime - lastNotificationUpdateTime).coerceAtLeast(0L)
         val expectedAdvance = elapsedSinceUpdate / 1000.0 * playbackSpeed.coerceAtLeast(0f)
         val positionJump = abs(currentPositionSeconds - lastPublishedPositionSeconds) > expectedAdvance + 3.0
@@ -2351,22 +2174,16 @@ class MediaPlaybackService :
 
       updateExternalDisplayWakeLock(false)
       releaseMpvAccessBeforeShutdown()
-      lastForegroundNotification = null
       foregroundReady = false
+      playerActivity = null
       abandonAudioOwnership()
       if (noisyReceiverRegistered) {
         runCatching { unregisterReceiver(noisyReceiver) }
         noisyReceiverRegistered = false
       }
-      if (activeInstance === this) isServiceRunning = false
 
       try {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-          stopForeground(STOP_FOREGROUND_REMOVE)
-        } else {
-          @Suppress("DEPRECATION")
-          stopForeground(true)
-        }
+        ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
       } catch (e: Exception) {
         Log.e(TAG, "Error stopping foreground", e)
       }
@@ -2391,10 +2208,6 @@ class MediaPlaybackService :
         if (!it.isRecycled) it.recycle()
       }
       thumbnail = null
-      lastPaletteThumbnail?.let {
-        if (!it.isRecycled) it.recycle()
-      }
-      lastPaletteThumbnail = null
 
       Log.d(TAG, "Service cleanup completed")
     } catch (e: Exception) {
@@ -2405,7 +2218,6 @@ class MediaPlaybackService :
           .onFailure { Log.e(TAG, "Error stopping detached playback after service destruction", it) }
       }
       if (activeInstance === this) {
-        isServiceRunning = false
         activeInstance = null
       }
       handingBackToActivity = false
@@ -2414,8 +2226,23 @@ class MediaPlaybackService :
   }
 
   override fun onTaskRemoved(rootIntent: Intent?) {
-    Log.d(TAG, "Task removed - keeping foreground background playback active")
+    // A player still on screen (picture-in-picture lives in its own task) keeps playing when
+    // another mpvRx card is cleared.
+    if (activityForeground) {
+      super.onTaskRemoved(rootIntent)
+      return
+    }
+    // Clearing mpvRx from Recents ends its background playback, music as well as video.
+    Log.d(TAG, "Task removed - ending playback")
     savePlaybackStateBeforeTaskRemoval()
+    if (::mediaSession.isInitialized && !mpvAccessReleased) {
+      stopPlaybackAndService(force = true)
+    } else {
+      torrentStreamingEngine.stopStream()
+      PlaybackSession.stop(clearQueue = true)
+      stopForegroundNotification()
+      stopSelf()
+    }
     super.onTaskRemoved(rootIntent)
   }
 }
