@@ -139,6 +139,7 @@ import com.composables.icons.materialsymbols.roundedfilled.Push_pin
 import com.composables.icons.materialsymbols.roundedfilled.Queue_music
 import com.composables.icons.materialsymbols.roundedfilled.Refresh
 import com.composables.icons.materialsymbols.roundedfilled.Remove
+import com.composables.icons.materialsymbols.roundedfilled.Replace_audio
 import com.composables.icons.materialsymbols.roundedfilled.Repeat
 import com.composables.icons.materialsymbols.roundedfilled.Repeat_on
 import com.composables.icons.materialsymbols.roundedfilled.Repeat_one
@@ -375,6 +376,7 @@ object Icons {
     val Repeat by lazy(LazyThreadSafetyMode.NONE) { AppIcon(MaterialSymbols.RoundedFilled.Repeat) }
     val RepeatOn by lazy(LazyThreadSafetyMode.NONE) { AppIcon(MaterialSymbols.RoundedFilled.Repeat_on) }
     val RepeatOne by lazy(LazyThreadSafetyMode.NONE) { AppIcon(MaterialSymbols.RoundedFilled.Repeat_one) }
+    val ReplaceAudio by lazy(LazyThreadSafetyMode.NONE) { AppIcon(MaterialSymbols.RoundedFilled.Replace_audio) }
     val Replay by lazy(LazyThreadSafetyMode.NONE) { AppIcon(MaterialSymbols.RoundedFilled.Replay) }
     val ResetIso by lazy(LazyThreadSafetyMode.NONE) { AppIcon(MaterialSymbols.RoundedFilled.Reset_iso) }
     val Restore by lazy(LazyThreadSafetyMode.NONE) { AppIcon(MaterialSymbols.RoundedFilled.Undo) }

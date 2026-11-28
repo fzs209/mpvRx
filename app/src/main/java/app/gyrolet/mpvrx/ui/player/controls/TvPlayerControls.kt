@@ -79,6 +79,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import app.gyrolet.mpvrx.R
 import app.gyrolet.mpvrx.preferences.GesturePreferences
+import app.gyrolet.mpvrx.preferences.PlayerButton
 import app.gyrolet.mpvrx.preferences.PlayerPreferences
 import app.gyrolet.mpvrx.preferences.preference.collectAsState
 import app.gyrolet.mpvrx.ui.icons.AppIcon
@@ -352,6 +353,11 @@ internal fun TvPlayerControls(
                 onClick = { onOpenSheet(Sheets.VideoQuality) },
               )
             }
+            TvPlayerButton(
+              icon = PlayerButton.SWITCH_PLAYER_LAYOUT.icon,
+              contentDescription = stringResource(R.string.player_switch_to_audio),
+              onClick = { viewModel.setAudioPlayerPresentation(true) },
+            )
             TvPlayerButton(
               icon = Icons.RoundedFilled.MoreVert,
               contentDescription = stringResource(R.string.player_sheets_more_title),

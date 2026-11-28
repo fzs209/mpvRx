@@ -111,6 +111,7 @@ import app.gyrolet.mpvrx.ui.cast.CastPlaybackController
 import app.gyrolet.mpvrx.ui.player.components.VideoAmbientBackground
 import app.gyrolet.mpvrx.ui.player.components.rememberVideoAmbientFrame
 import app.gyrolet.mpvrx.ui.player.controls.PlayerControls
+import app.gyrolet.mpvrx.ui.player.controls.PresentationArtwork
 import app.gyrolet.mpvrx.ui.player.controls.components.panels.toColorHexString
 import app.gyrolet.mpvrx.ui.player.controls.tvScrubStepSeconds
 import app.gyrolet.mpvrx.ui.player.ytdlp.YouTubeAuthenticationRecovery
@@ -138,6 +139,7 @@ import app.gyrolet.mpvrx.utils.media.fileExtension
 import app.gyrolet.mpvrx.utils.media.listTreeFilesSafely
 import app.gyrolet.mpvrx.utils.media.openPersistedTreeDocument
 import app.gyrolet.mpvrx.utils.storage.FileTypeUtils
+import com.kyant.backdrop.backdrops.LayerBackdrop
 import `is`.xyz.mpv.MPVLib
 import `is`.xyz.mpv.MPVNode
 import `is`.xyz.mpv.Utils
@@ -437,6 +439,12 @@ class PlayerActivity :
   private var playbackOwnerToken = 0L
   private var wasInPipMode = false
   private var isAmbientPipMode by mutableStateOf(false)
+
+  // The video layout's Liquid Glass samples this album art recording while audio plays there.
+  private var presentationArtworkBackdrop by mutableStateOf<LayerBackdrop?>(null)
+
+  // The layout last applied to the window; a change switches orientation and brightness with it.
+  private var shownAudioLayout: Boolean? = null
   private val videoHiddenForGeneration = MutableStateFlow<Long?>(null)
   private var handledPipDismissal = false
   private var pendingPipExitResolution = false
@@ -873,6 +881,10 @@ class PlayerActivity :
 
     val attachedToCurrentSession =
       attachToCurrentPlaybackSessionIfRequested() || attachToSavedPlaybackSessionIfValid()
+    if (attachedToCurrentSession && intent.getBooleanExtra(EXTRA_PLAYER_PRESENTATION_VIDEO, false)) {
+      viewModel.setAudioPlayerPresentation(false)
+      intent.removeExtra(EXTRA_PLAYER_PRESENTATION_VIDEO)
+    }
     if (!attachedToCurrentSession && !restoredSavedPlaylistItem && playlist.isNotEmpty()) {
       pendingSavedPlaylistSelection = null
     }
@@ -907,6 +919,8 @@ class PlayerActivity :
     // The local/network resolver now runs in parallel with this non-critical Android/UI setup.
     setupBackPressHandler()
     setupVideoAmbientBackground()
+    setupPresentationArtwork()
+    setupOsdLayer()
     setupPlayerControls()
     setupAudioPlayerViewObserver()
     setupMotionInterpolationObserver()
@@ -959,7 +973,10 @@ class PlayerActivity :
 
     lifecycleScope.launch {
       audioPreferences.audioOrientation.changes().drop(1).collect {
-        if (isKnownAudioLaunch(intent) || viewModel.isAudioOnly.value) {
+        if (isAudioLayoutShown() ||
+          (playerPreferences.orientation.get() == PlayerOrientation.Video &&
+            (viewModel.isAudioOnly.value || isCurrentMediaKnownAudio()))
+        ) {
           setOrientation()
         }
       }
@@ -969,7 +986,7 @@ class PlayerActivity :
       playerPreferences.orientation.changes().drop(1).collect {
         // A preference picked in settings replaces the rotation-button choice.
         PlayerOrientationPolicy.manualOrientation = null
-        if (!isKnownAudioLaunch(intent) && !viewModel.isAudioOnly.value) setOrientation()
+        if (!isAudioLayoutShown()) setOrientation()
       }
     }
 
@@ -1345,8 +1362,8 @@ class PlayerActivity :
           decoderPreferences.dolbyVisionDirect.changes(),
           decoderPreferences.mediaCodecEmbed.changes(),
         ) { dolbyVisionDirect, mediaCodecEmbed ->
-          DolbyVisionDirect.wantsOsdOverlay(dolbyVisionDirect, mediaCodecEmbed)
-        }.distinctUntilChanged().collect { player.setOsdOverlay(it) }
+          DolbyVisionDirect.wantsDirectOutput(dolbyVisionDirect, mediaCodecEmbed)
+        }.distinctUntilChanged().collect { player.setDolbyVisionDirectOutput(it) }
       }
       lifecycleScope.launch {
         repeatOnLifecycle(Lifecycle.State.STARTED) {
@@ -1368,6 +1385,8 @@ class PlayerActivity :
                 onBackPress = ::handleBackPress,
                 videoSurface = binding.player,
                 modifier = Modifier,
+                artworkView = binding.presentationArtwork,
+                artworkBackdrop = presentationArtworkBackdrop,
               )
             }
             PlayerSheetTransitionOverlay(
@@ -1386,6 +1405,29 @@ class PlayerActivity :
     } else {
       binding.controls.postOnAnimation { composeControls() }
     }
+  }
+
+  private fun setupPresentationArtwork() {
+    binding.presentationArtwork.setViewCompositionStrategy(
+      ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed,
+    )
+    // Pre-Android 11 stops inset dispatch at a consuming sibling, which would starve the controls of IME insets.
+    binding.presentationArtwork.consumeWindowInsets = false
+    binding.presentationArtwork.setContent {
+      MpvrxTheme {
+        PresentationArtwork(viewModel) { presentationArtworkBackdrop = it }
+      }
+    }
+  }
+
+  /**
+   * FongMi build: mpv draws subtitles, statistics and its OSD on a layer of their own, above YouTube
+   * Ambient and the album art but below the controls, instead of into the video Surface under them.
+   */
+  private fun setupOsdLayer() {
+    if (!DolbyVisionDirect.isBuildSupported) return
+    binding.osdLayer.visibility = View.VISIBLE
+    player.setOsdLayer(binding.osdLayer)
   }
 
   private fun setupVideoAmbientBackground() {
@@ -1415,10 +1457,12 @@ class PlayerActivity :
       val edgeBlend by viewModel.ambientYouTubeEdgeBlend.collectAsState()
       val lifecycleActive by viewModel.isAmbientLifecycleActive.collectAsState()
       val isAudioOnly by viewModel.isAudioOnly.collectAsState()
+      val presentation by viewModel.playerPresentation.collectAsState()
       val playbackState by PlaybackSession.state.collectAsState()
       val osdDimensions by PlaybackSession.propNode["osd-dimensions"].collectAsState()
       val directRect by PlaybackSession.propString[ANDROID_VIDEO_RECT].collectAsState()
       val statisticsPage by PlaybackSession.visibleStatisticsPage.collectAsState()
+      val osdLayer by PlaybackSession.osdOverlayAttached.collectAsState()
       val hdrScreenMode by viewModel.hdrScreenMode.collectAsState()
       val orientation = LocalConfiguration.current.orientation
       val followZoom by playerPreferences.overlaysFollowVideoZoom.collectPreferenceAsState()
@@ -1455,6 +1499,7 @@ class PlayerActivity :
           style == AmbientStyle.YouTube &&
           !MpvConfigOverridePolicy.ownsAny(MpvConfigControlledFeatures.AMBIENT) &&
           !isAudioOnly &&
+          presentation != true &&
           !isAmbientPipMode &&
           playbackReady &&
           playbackState.surfaceAttached
@@ -1486,8 +1531,9 @@ class PlayerActivity :
           },
         )
       MpvrxTheme {
-        // Statistics no longer hide Ambient; it only steps back so their text stays readable.
-        val fullOpacity = if (statisticsPage != 0) AMBIENT_OPACITY_WITH_STATISTICS else 1f
+        // FongMi's OSD layer draws statistics above Ambient. Elsewhere mpv draws them into the video
+        // Surface under it, so Ambient only steps back while a page is open to keep them readable.
+        val fullOpacity = if (statisticsPage != 0 && !osdLayer) AMBIENT_OPACITY_WITH_STATISTICS else 1f
         val opacity =
           animateFloatAsState(
             targetValue = if (active && ambientFrame.frame != null) fullOpacity else 0f,
@@ -1497,11 +1543,13 @@ class PlayerActivity :
         val showOverlay = canShowAmbient && hasMargins && ambientFrame.frame != null && (active || opacity.value > 0f)
         Box(Modifier.fillMaxSize().onSizeChanged { viewport = it }) {
           if (showOverlay) {
-            // mpv composites subtitles into the Surface. Keep text out of the painted margins.
-            DisposableEffect(playbackState.generation) {
-              val owner = playbackOwnerToken
-              PlaybackSession.keepYouTubeAmbientSubtitlesInsidePicture(owner, true)
-              onDispose { PlaybackSession.keepYouTubeAmbientSubtitlesInsidePicture(owner, false) }
+            if (!osdLayer) {
+              // mpv composites subtitles into the Surface. Keep text out of the painted margins.
+              DisposableEffect(playbackState.generation) {
+                val owner = playbackOwnerToken
+                PlaybackSession.keepYouTubeAmbientSubtitlesInsidePicture(owner, true)
+                onDispose { PlaybackSession.keepYouTubeAmbientSubtitlesInsidePicture(owner, false) }
+              }
             }
             // Use mpv's rendered picture as the cutout; toggling Ambient must not resize its surface.
             VideoAmbientBackground(
@@ -1592,10 +1640,13 @@ class PlayerActivity :
     // mpv's video-zoom moves only the video plane and leaves overlays where they are.
     val followVideo = playerPreferences.overlaysFollowVideoZoom.get()
     val viewScale = if (followVideo) videoZoomMultiplier(zoom) else 1f
-    binding.player.scaleX = viewScale
-    binding.player.scaleY = viewScale
-    binding.player.translationX = if (followVideo) panX else 0f
-    binding.player.translationY = if (followVideo) panY else 0f
+    // FongMi's OSD layer carries the subtitles and OSD outside the video view, so it zooms with it.
+    for (view in arrayOf<View>(binding.player, binding.osdLayer)) {
+      view.scaleX = viewScale
+      view.scaleY = viewScale
+      view.translationX = if (followVideo) panX else 0f
+      view.translationY = if (followVideo) panY else 0f
+    }
     if (!canIssueMpvCommands()) return
     val generation = PlaybackSession.state.value.generation
     if (generation == lastVideoTransformGeneration &&
@@ -1673,16 +1724,28 @@ class PlayerActivity :
     lifecycleScope.launch {
       repeatOnLifecycle(Lifecycle.State.STARTED) {
         combine(
-          PlaybackSession.state.map { it.generation to it.phase }.distinctUntilChanged(),
+          combine(
+            PlaybackSession.state.map { it.generation to it.phase }.distinctUntilChanged(),
+            // Without FongMi's OSD layer, mpv draws statistics only into the video Surface.
+            combine(PlaybackSession.visibleStatisticsPage, PlaybackSession.osdOverlayAttached) { page, osdLayer ->
+              page != 0 && !osdLayer
+            },
+            ::Pair,
+          ),
+          viewModel.playerPresentation,
           viewModel.isAudioOnly,
-          PlaybackSession.propString["vid"],
-          PlaybackSession.propBoolean["vo-configured"],
+          combine(PlaybackSession.propString["vid"], PlaybackSession.propBoolean["vo-configured"], ::Pair),
           videoHiddenForGeneration,
-        ) { (generation, phase), audioOnly, _, voConfigured, hiddenGeneration ->
+        ) { (state, statisticsOnSurface), presentation, audioOnly, (_, voConfigured), hiddenGeneration ->
+          val (generation, phase) = state
+          if (presentation == true || (phase != PlaybackPhase.READY && phase != PlaybackPhase.BACKGROUND)) {
+            return@combine false
+          }
+          // A forced video layout can display mpv's OSD without a selected video track.
+          if (presentation == false && statisticsOnSurface) return@combine true
           !audioOnly &&
             generation != hiddenGeneration &&
             voConfigured == true &&
-            (phase == PlaybackPhase.READY || phase == PlaybackPhase.BACKGROUND) &&
             PlaybackSession.state.value.currentItem
               ?.isDefinitelyAudioOnly() == false &&
             PlaybackSession.readLoadedMedia(generation) { reader ->
@@ -1690,40 +1753,64 @@ class PlayerActivity :
                 reader.string("current-tracks/video/albumart") != "yes" &&
                 (reader.string("current-tracks/video/image") != "yes" || reader.int("current-tracks/audio/id") == null)
             } == true
-        }.distinctUntilChanged().collect { showVideo ->
+        }.distinctUntilChanged().collect { showPlayerOutput ->
           // Keep the native Surface available to initialize a real video. The cover is above
           // the Surface but below the player UI and its album art.
-          binding.videoPresentationCover.visibility = if (showVideo) View.INVISIBLE else View.VISIBLE
+          binding.videoPresentationCover.visibility = if (showPlayerOutput) View.INVISIBLE else View.VISIBLE
         }
       }
     }
     lifecycleScope.launch {
       repeatOnLifecycle(Lifecycle.State.STARTED) {
-        viewModel.isAudioOnly.collect { isAudioOnly ->
-          if (isAudioOnly) {
+        combine(viewModel.isAudioOnly, viewModel.playerPresentation) { isAudioOnly, presentation ->
+          !isAudioOnly || presentation == false
+        }.distinctUntilChanged().collect { showSurface ->
+          // mpv uses this Surface for OSD even when there is no video track.
+          binding.player.visibility = if (showSurface) View.VISIBLE else View.INVISIBLE
+          if (showSurface) binding.player.clipToOutline = false
+        }
+      }
+    }
+    lifecycleScope.launch {
+      repeatOnLifecycle(Lifecycle.State.STARTED) {
+        // The music player and the video player differ in more than their controls. Follow the one
+        // on screen, including a switch between them for the same media.
+        combine(
+          viewModel.playerPresentation,
+          viewModel.isAudioOnly,
+          PlaybackSession.queue.map { it.currentItem?.declaredMediaKind() },
+          PlaybackSession.state.map { it.generation },
+        ) { _, _, _, _ -> isAudioLayoutShown() }.distinctUntilChanged().collect { audioLayout ->
+          val switched = shownAudioLayout != null && shownAudioLayout != audioLayout
+          shownAudioLayout = audioLayout
+          if (audioLayout) {
+            // The music player never holds a video brightness override and keeps its controls up.
             applyPlaybackBrightnessPolicy(isAudio = true)
             viewModel.showControls()
-            binding.player.visibility = View.INVISIBLE
-            try {
-              windowInsetsController.apply {
-                systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_DEFAULT
-                show(WindowInsetsCompat.Type.statusBars())
-                show(WindowInsetsCompat.Type.navigationBars())
-                isAppearanceLightStatusBars = false
-                isAppearanceLightNavigationBars = false
-              }
-            } catch (e: Exception) {
-              Log.e(TAG, "Failed to show system bars for audio playback", e)
-            }
-          } else {
-            binding.player.clipToOutline = false
-            binding.player.visibility = View.VISIBLE
+          } else if (switched) {
+            applyPlaybackBrightnessPolicy(isAudio = false)
           }
-          updateStatusBarProtection()
+          applySystemBarsForPlayback()
+          if (switched) setOrientation()
+          // Picture-in-Picture belongs to the video layout.
+          if (::pipHelper.isInitialized) pipHelper.updatePictureInPictureParams()
         }
       }
     }
   }
+
+  /**
+   * The music player layout is on screen, rather than the video player layout. The same rule as
+   * PlayerControls, so the window matches the controls even before they are first composed.
+   */
+  private fun isAudioLayoutShown(): Boolean =
+    viewModel.playerPresentation.value
+      ?: when (PlaybackSession.queue.value.currentItem?.declaredMediaKind()) {
+        null -> isCurrentMediaKnownAudio()
+        DeclaredPlaybackMediaKind.VIDEO -> false
+        DeclaredPlaybackMediaKind.AUDIO -> true
+        DeclaredPlaybackMediaKind.UNKNOWN -> viewModel.isAudioOnly.value || isCurrentMediaKnownAudio()
+      }
 
   private fun coverVideoForAudioLoad() {
     // Never uncover the outgoing file's last frame while an incoming audio file is being resolved.
@@ -1739,7 +1826,10 @@ class PlayerActivity :
       MPVPipHelper(
         activity = this,
         mpvView = player,
-        isAudioPlayer = { (viewModelHostAttached && viewModel.isAudioOnly.value) || isCurrentMediaKnownAudio() },
+        isAudioPlayer = {
+          (viewModelHostAttached && (viewModel.isAudioOnly.value || isAudioLayoutShown())) ||
+            isCurrentMediaKnownAudio()
+        },
         isVideoLoaded = { isReady },
       )
   }
@@ -1921,7 +2011,8 @@ class PlayerActivity :
       autoPipEnabled =
         DeviceFormFactor.supportsPlaybackPictureInPicture(this) && playerPreferences.autoPiPOnNavigation.get(),
       mediaReady = isReady,
-      isAudioMedia = viewModel.isAudioOnly.value || isCurrentMediaKnownAudio(),
+      // The music player covers the video; Picture-in-Picture belongs to the video layout.
+      isAudioMedia = viewModel.isAudioOnly.value || isCurrentMediaKnownAudio() || isAudioLayoutShown(),
       isActivityUnavailable = isFinishing || isDestroyed || isUserFinishing,
       isAlreadyInPip = isInPictureInPictureMode,
     )
@@ -2769,7 +2860,7 @@ class PlayerActivity :
   }
 
   private fun handleSystemBarsVisibility(insets: WindowInsetsCompat) {
-    val isAudio = viewModel.isAudioOnly.value || isKnownAudioLaunch(intent) || isCurrentMediaKnownAudio()
+    val isAudio = isAudioLayoutShown()
     if (isAudio) {
       cancelSystemBarsAutoHide()
       try {
@@ -2797,7 +2888,7 @@ class PlayerActivity :
   }
 
   private fun shouldAutoHideSystemBars(): Boolean {
-    val isAudio = viewModel.isAudioOnly.value || isKnownAudioLaunch(intent) || isCurrentMediaKnownAudio()
+    val isAudio = isAudioLayoutShown()
     return !isInPictureInPictureMode &&
       !isAudio &&
       !viewModel.controlsShown.value &&
@@ -2830,7 +2921,7 @@ class PlayerActivity :
     cancelSystemBarsAutoHide()
     if (isInPictureInPictureMode) return
 
-    val isAudio = viewModel.isAudioOnly.value || isKnownAudioLaunch(intent) || isCurrentMediaKnownAudio()
+    val isAudio = isAudioLayoutShown()
     val controlsVisible = viewModel.controlsShown.value
     val showStatus = isAudio || (controlsVisible && playerPreferences.showSystemStatusBar.get())
     val showNavigation = isAudio || (controlsVisible && playerPreferences.showSystemNavigationBar.get())
@@ -2896,7 +2987,7 @@ class PlayerActivity :
   }
 
   private fun updateStatusBarProtection(insets: WindowInsetsCompat? = ViewCompat.getRootWindowInsets(binding.root)) {
-    val isAudio = viewModel.isAudioOnly.value || isKnownAudioLaunch(intent) || isCurrentMediaKnownAudio()
+    val isAudio = isAudioLayoutShown()
     val scrimHeight =
       if (!isAudio &&
         !isInPictureInPictureMode &&
@@ -5794,7 +5885,7 @@ class PlayerActivity :
     val saveIdentifier = activeSaveMediaIdentifier.ifBlank { mediaIdentifier }
     if (saveIdentifier.isBlank()) return null
 
-    return PlaybackSession.readLoadedPlaybackState(saveIdentifier) { position, duration ->
+    return PlaybackSession.readLoadedPlaybackState(saveIdentifier) { position, duration, item ->
       PlaybackStateSnapshot(
         mediaIdentifier = saveIdentifier,
         mediaTitle = mediaTitle,
@@ -5803,6 +5894,12 @@ class PlayerActivity :
         isPositionRestorePending =
           PlaybackSession.isPositionRestorePending(PlaybackSession.state.value.activeGeneration),
         isLive = PlaybackSession.isLiveMedia(),
+        isAudio =
+          when (item.declaredMediaKind()) {
+            DeclaredPlaybackMediaKind.AUDIO -> true
+            DeclaredPlaybackMediaKind.VIDEO -> false
+            DeclaredPlaybackMediaKind.UNKNOWN -> viewModel.isAudioOnly.value || isCurrentMediaKnownAudio()
+          },
         playbackSpeed = PlaybackSession.getPropertyDouble("speed") ?: DEFAULT_PLAYBACK_SPEED,
         videoZoom = PlaybackSession.videoZoom.value,
         sid = player.sid,
@@ -6316,6 +6413,10 @@ class PlayerActivity :
         isBackgroundPlaybackSessionActive = false
         pendingBackgroundTransition = false
         if (attachToCurrentPlaybackSessionIfRequested(intent)) {
+          if (intent.getBooleanExtra(EXTRA_PLAYER_PRESENTATION_VIDEO, false)) {
+            viewModel.setAudioPlayerPresentation(false)
+            this.intent.removeExtra(EXTRA_PLAYER_PRESENTATION_VIDEO)
+          }
           PlaybackSession.markForeground()
           isReady = PlaybackSession.state.value.phase == PlaybackPhase.READY
           if (isReady) viewModel.onVideoLoadCompleted()
@@ -6359,6 +6460,7 @@ class PlayerActivity :
     val previouslyLoadedTorrentFileIndex = this.intent.getIntExtra("torrent_file_index", -1)
     val previousItemWasReady = isReady
 
+    viewModel.resetPlayerPresentation()
     setIntent(intent)
     // A new media launch drops the rotation picked for the previous video.
     PlayerOrientationPolicy.manualOrientation = null
@@ -7273,7 +7375,7 @@ class PlayerActivity :
    * Enters Picture-in-Picture mode and hides all overlay controls.
    */
   fun enterPipModeHidingOverlay() {
-    if (viewModel.isAudioOnly.value || isCurrentMediaKnownAudio()) return
+    if (viewModel.isAudioOnly.value || isCurrentMediaKnownAudio() || isAudioLayoutShown()) return
     runCatching {
       enterPipUIMode()
     }.onFailure { e ->
@@ -7284,7 +7386,13 @@ class PlayerActivity :
   }
 
   private fun enterPipModeSmoothly(): Boolean {
-    if (viewModel.isAudioOnly.value || isCurrentMediaKnownAudio() || !isReady || isFinishing || isDestroyed) {
+    if (viewModel.isAudioOnly.value ||
+      isCurrentMediaKnownAudio() ||
+      isAudioLayoutShown() ||
+      !isReady ||
+      isFinishing ||
+      isDestroyed
+    ) {
       return false
     }
     binding.root.animate().cancel()
@@ -7352,10 +7460,16 @@ class PlayerActivity :
 
     val manual = PlayerOrientationPolicy.manualOrientation
     val target =
-      if (isCurrentMediaKnownAudio() || viewModel.isAudioOnly.value) {
+      // The music player keeps the audio orientation, even for a video switched into it.
+      if (isAudioLayoutShown()) {
         PlayerOrientationPolicy.forAudioPreference(audioPreferences.audioOrientation.get())
       } else if (manual != null) {
         manual
+      } else if (playerPreferences.orientation.get() == PlayerOrientation.Video &&
+        (viewModel.isAudioOnly.value || isCurrentMediaKnownAudio())
+      ) {
+        // Album artwork is not video geometry; follow the audio orientation instead of its shape.
+        PlayerOrientationPolicy.forAudioPreference(audioPreferences.audioOrientation.get())
       } else {
         val preference = playerPreferences.orientation.get()
         // A saved custom ratio is re-applied to every file and is already part of mpv's reported
@@ -7561,9 +7675,7 @@ class PlayerActivity :
         .filterNotNull()
         .any { source -> source.fileExtension() in FileTypeUtils.AUDIO_EXTENSIONS }
 
-  private fun applyPlaybackBrightnessPolicy(
-    isAudio: Boolean = viewModel.isAudioOnly.value || isCurrentMediaKnownAudio(),
-  ) {
+  private fun applyPlaybackBrightnessPolicy(isAudio: Boolean = isAudioLayoutShown()) {
     if (isTelevision || isAudio || !playerPreferences.rememberBrightness.get()) {
       // Audio playback must never hold a per-window video brightness override. Resetting to
       // BRIGHTNESS_OVERRIDE_NONE also restores the system brightness slider immediately.
@@ -7750,7 +7862,7 @@ class PlayerActivity :
 
       KeyEvent.KEYCODE_VOLUME_UP -> {
         if (isTelevision) consumedTvRemoteKeys += keyCode
-        if (viewModel.isAudioOnly.value) {
+        if (isAudioLayoutShown()) {
           viewModel.changeVolumeBy(1, showUi = true)
           return true
         }
@@ -7761,7 +7873,7 @@ class PlayerActivity :
 
       KeyEvent.KEYCODE_VOLUME_DOWN -> {
         if (isTelevision) consumedTvRemoteKeys += keyCode
-        if (viewModel.isAudioOnly.value) {
+        if (isAudioLayoutShown()) {
           viewModel.changeVolumeBy(-1, showUi = true)
           return true
         }
@@ -9244,8 +9356,9 @@ class PlayerActivity :
     private const val MILLISECONDS_TO_SECONDS = 1000
     private const val RENDERER_RECOVERY_WAKE_TIMEOUT_MS = 20_000L
 
-    // mpv draws the statistics into the video Surface, under the YouTube Ambient layer. While a
-    // page is open Ambient stays at this strength, so stats text in the painted margins reads through.
+    // Without FongMi's OSD layer, mpv draws the statistics into the video Surface, under the YouTube
+    // Ambient layer. While a page is open Ambient stays at this strength, so stats text in the
+    // painted margins reads through.
     private const val AMBIENT_OPACITY_WITH_STATISTICS = 0.5f
 
     /**
@@ -9292,6 +9405,7 @@ class PlayerActivity :
 
     const val EXTRA_PREPARED_PLAYBACK_QUEUE = "prepared_playback_queue"
     const val EXTRA_PREPARED_PLAYBACK_TOKEN = "prepared_playback_token"
+    const val EXTRA_PLAYER_PRESENTATION_VIDEO = "player_presentation_video"
     private const val EXTRA_SCRIPT_RUNTIME_RESTART = "script_runtime_restart"
     private const val EXTRA_CORE_RECOVERY_AT = "core_recovery_at"
     private const val EXTRA_SCRIPT_RESTORE_MEDIA_ID = "script_restore_media_id"

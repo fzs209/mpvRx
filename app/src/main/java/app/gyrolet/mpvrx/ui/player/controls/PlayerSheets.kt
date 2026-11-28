@@ -112,14 +112,13 @@ fun PlayerSheets(
   onSpeedChange: (Float) -> Unit,
   onAddSpeedPreset: (Float) -> Unit,
   onRemoveSpeedPreset: (Float) -> Unit,
-  onResetSpeedPresets: () -> Unit,
-  onMakeDefaultSpeed: (Float) -> Unit,
-  onResetDefaultSpeed: () -> Unit,
   // More sheet
   onStartSleepTimer: (Int) -> Unit,
   onOpenPanel: (Panels) -> Unit,
   onShowSheet: (Sheets) -> Unit,
   onDismissRequest: () -> Unit,
+  // Statistics pages belong to the video layout only.
+  statisticsAvailable: Boolean = true,
 ) {
   val context = LocalContext.current
   val isTelevision = DeviceFormFactor.isTelevision(context)
@@ -517,6 +516,7 @@ fun PlayerSheets(
         filtersEnabled = MpvConfigOverride.VIDEO_FILTERS.optionNames.any { it !in configOwnedOptions },
         equalizerEnabled = "af" !in configOwnedOptions,
         anime4KEnabled = MpvConfigControlledFeatures.ANIME4K.none(configOwnedOptions::contains),
+        showStatistics = statisticsAvailable,
       )
     }
 
@@ -536,9 +536,6 @@ fun PlayerSheets(
         speedPresets = speedPresets,
         onAddSpeedPreset = onAddSpeedPreset,
         onRemoveSpeedPreset = onRemoveSpeedPreset,
-        onResetPresets = onResetSpeedPresets,
-        onMakeDefault = onMakeDefaultSpeed,
-        onResetDefault = onResetDefaultSpeed,
         onDismissRequest = onDismissRequest,
         speedControlEnabled = "speed" !in configOwnedOptions,
         pitchCorrectionEnabled = "audio-pitch-correction" !in configOwnedOptions,

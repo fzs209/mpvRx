@@ -9,12 +9,14 @@
 
 package app.gyrolet.mpvrx.ui.player.controls
 
+import android.content.Intent
 import android.content.res.Configuration.ORIENTATION_PORTRAIT
 import android.database.ContentObserver
 import android.media.AudioManager
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
+import android.view.View
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.LocalActivity
 import androidx.compose.animation.AnimatedVisibility
@@ -131,7 +133,6 @@ import app.gyrolet.mpvrx.preferences.PlayerButton
 import app.gyrolet.mpvrx.preferences.PlayerPreferences
 import app.gyrolet.mpvrx.preferences.allPlayerButtons
 import app.gyrolet.mpvrx.preferences.preference.collectAsState
-import app.gyrolet.mpvrx.preferences.preference.deleteAndGet
 import app.gyrolet.mpvrx.preferences.preference.minusAssign
 import app.gyrolet.mpvrx.preferences.preference.plusAssign
 import app.gyrolet.mpvrx.ui.components.SwipeDismissibleToast
@@ -146,6 +147,7 @@ import app.gyrolet.mpvrx.ui.player.DeclaredPlaybackMediaKind
 import app.gyrolet.mpvrx.ui.player.Decoder.Companion.getDecoderFromValue
 import app.gyrolet.mpvrx.ui.player.InAppMusicSheetState
 import app.gyrolet.mpvrx.ui.player.MPVView
+import app.gyrolet.mpvrx.ui.player.MediaPlaybackService
 import app.gyrolet.mpvrx.ui.player.Panels
 import app.gyrolet.mpvrx.ui.player.PlaybackPhase
 import app.gyrolet.mpvrx.ui.player.PlaybackSession
@@ -160,6 +162,7 @@ import app.gyrolet.mpvrx.ui.player.buildControlsExitH
 import app.gyrolet.mpvrx.ui.player.buildControlsExitV
 import app.gyrolet.mpvrx.ui.player.components.VideoGlassBackdropSource
 import app.gyrolet.mpvrx.ui.player.components.rememberVideoGlassSource
+import app.gyrolet.mpvrx.ui.player.components.rememberViewGlassSource
 import app.gyrolet.mpvrx.ui.player.controls.components.AnimatedPlayPauseIcon
 import app.gyrolet.mpvrx.ui.player.controls.components.BrightnessSlider
 import app.gyrolet.mpvrx.ui.player.controls.components.BufferingPhase
@@ -189,6 +192,7 @@ import app.gyrolet.mpvrx.ui.theme.spacing
 import app.gyrolet.mpvrx.utils.device.DeviceFormFactor
 import app.gyrolet.mpvrx.utils.logging.Log
 import app.gyrolet.mpvrx.utils.storage.FileTypeUtils
+import com.kyant.backdrop.backdrops.LayerBackdrop
 import com.kyant.backdrop.backdrops.layerBackdrop
 import com.kyant.backdrop.backdrops.rememberLayerBackdrop
 import kotlinx.collections.immutable.persistentListOf
@@ -226,6 +230,7 @@ internal fun AudioPlayerScreen(
   val appearancePreferences = koinInject<AppearancePreferences>()
   val enableLiquidGlass by appearancePreferences.liquidGlassEnabled.collectAsState()
   val playbackQueue by PlaybackSession.queue.collectAsStateWithLifecycle()
+  val activity = LocalActivity.current
   val currentPlaybackItem = playbackQueue.currentItem
   val chapters by viewModel.playbackChapters.collectAsStateWithLifecycle(persistentListOf())
   val playbackSpeed by PlaybackSession.propFloat["speed"].collectAsStateWithLifecycle()
@@ -313,6 +318,15 @@ internal fun AudioPlayerScreen(
     }
   }
 
+  // Statistics exist only in the video layout. The music player turns every page off, including
+  // the one left open there when switching back, and anything mpv opens while it is on screen.
+  val advancedPreferences = koinInject<AdvancedPreferences>()
+  val visibleStatisticsPage by PlaybackSession.visibleStatisticsPage.collectAsStateWithLifecycle()
+  val selectedStatisticsPage by advancedPreferences.enabledStatisticsPage.collectAsState()
+  LaunchedEffect(visibleStatisticsPage, selectedStatisticsPage) {
+    if (visibleStatisticsPage != 0 || selectedStatisticsPage != 0) PlaybackSession.setStatisticsPage(0)
+  }
+
   // Only sheets and panels sample this layer; the controls would otherwise sample themselves.
   val audioBackdrop = rememberLayerBackdrop()
   Box(modifier = modifier.fillMaxSize()) {
@@ -322,6 +336,20 @@ internal fun AudioPlayerScreen(
       onBackPress = onBackPress,
       onOpenSheet = onOpenSheet,
       onOpenPanel = onOpenPanel,
+      onSwitchToVideo = {
+        if (inAppSheet != null && activity != null) {
+          val intent = Intent(activity, PlayerActivity::class.java).apply {
+            action = MediaPlaybackService.ACTION_OPEN_PLAYER
+            putExtra("is_audio", true)
+            putExtra("internal_launch", true)
+            putExtra(PlayerActivity.EXTRA_PLAYER_PRESENTATION_VIDEO, true)
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+          }
+          activity.startActivity(intent)
+        } else {
+          viewModel.setAudioPlayerPresentation(false)
+        }
+      },
       modifier = if (enableLiquidGlass) Modifier.layerBackdrop(audioBackdrop) else Modifier,
       sheetBackdrop = audioBackdrop.takeIf { enableLiquidGlass },
       inAppSheet = inAppSheet,
@@ -360,24 +388,14 @@ internal fun AudioPlayerScreen(
             PlaybackSession.setPropertyFloat("speed", it.toFixed(2))
           }
         },
-        onMakeDefaultSpeed = { playerPreferences.defaultSpeed.set(it.toFixed(2)) },
         onAddSpeedPreset = { playerPreferences.speedPresets += it.toFixed(2).toString() },
         onRemoveSpeedPreset = { playerPreferences.speedPresets -= it.toFixed(2).toString() },
-        onResetSpeedPresets = playerPreferences.speedPresets::delete,
         speedPresets = sortedSpeedPresets,
-        onResetDefaultSpeed = {
-          val speed = playerPreferences.defaultSpeed.deleteAndGet().toFixed(2)
-          if (currentPlaybackItem?.audiobook != null) {
-            app.gyrolet.mpvrx.ui.player.AudiobookPlayback
-              .setSpeed(speed)
-          } else {
-            PlaybackSession.setPropertyFloat("speed", speed)
-          }
-        },
         onStartSleepTimer = viewModel::startTimer,
         onOpenPanel = onOpenPanel,
         onShowSheet = onOpenSheet,
         onDismissRequest = { onOpenSheet(Sheets.None) },
+        statisticsAvailable = false,
       )
 
       PlayerPanels(
@@ -402,6 +420,8 @@ fun PlayerControls(
   onBackPress: () -> Unit,
   videoSurface: MPVView? = null,
   modifier: Modifier = Modifier,
+  artworkView: View? = null,
+  artworkBackdrop: LayerBackdrop? = null,
 ) {
   val spacing = MaterialTheme.spacing
   val isTelevision = DeviceFormFactor.isTelevision(LocalContext.current)
@@ -418,7 +438,7 @@ fun PlayerControls(
   // Glass needs the video on the Compose-recordable renderer, so this mirrors the renderer choice.
   // When HDR output keeps the video on a native surface ("Liquid glass in HDR" off, or HDR owned by
   // mpv.conf), every player control uses its regular form, exactly as with Liquid Glass off.
-  val enableLiquidGlass =
+  val videoLiquidGlass =
     shouldUseTextureRendering(
       liquidGlass = liquidGlassPreference,
       hdrOutput = hdrOutputPreference,
@@ -599,13 +619,17 @@ fun PlayerControls(
   val isAudioOnly by viewModel.isAudioOnly.collectAsState()
   val activity = LocalActivity.current as? PlayerActivity
   val currentPlaybackItem = playbackQueue.currentItem
-  val useAudioPlayer =
+  val playerPresentation by viewModel.playerPresentation.collectAsState()
+  val defaultAudioPlayer =
     when (currentPlaybackItem?.declaredMediaKind()) {
       null -> activity?.isCurrentMediaKnownAudio() == true
       DeclaredPlaybackMediaKind.VIDEO -> false
       DeclaredPlaybackMediaKind.AUDIO -> true
       DeclaredPlaybackMediaKind.UNKNOWN -> isAudioOnly || activity?.isCurrentMediaKnownAudio() == true
     }
+  val useAudioPlayer = playerPresentation ?: defaultAudioPlayer
+  // The album art layer and the volume feedback follow the layout resolved here.
+  LaunchedEffect(viewModel, defaultAudioPlayer) { viewModel.onDefaultPlayerLayoutResolved(defaultAudioPlayer) }
   if (useAudioPlayer) {
     AudioPlayerScreen(
       viewModel = viewModel,
@@ -615,6 +639,8 @@ fun PlayerControls(
     )
     return
   }
+  // Audio here shows album art from its own layer, which glass samples without a video renderer.
+  val enableLiquidGlass = if (defaultAudioPlayer) liquidGlassPreference else videoLiquidGlass
 
   val playerActivity = LocalActivity.current as PlayerActivity
   val configuration = LocalConfiguration.current
@@ -824,14 +850,26 @@ fun PlayerControls(
     key(glassSource, isHdrOutputEnabled, liquidGlassInHdr) {
       rememberLayerBackdrop(onDraw = { with(glassSource) { drawVideo() } })
     }
+  // Audio has no picture in mpv's output, only the album art layer PlayerActivity shows under the
+  // OSD layer. The glass samples that recording, live, the same way as the video's GPU layer.
+  val artworkGlassSource = rememberViewGlassSource(artworkView, artworkBackdrop)
+  val artworkGlassBackdrop =
+    key(artworkGlassSource) {
+      rememberLayerBackdrop(onDraw = { with(artworkGlassSource) { drawVideo() } })
+    }
+  val activeGlassSource = if (defaultAudioPlayer) artworkGlassSource else glassSource
   val playerKyantBackdrop =
-    videoBackdrop.takeIf {
-      enableLiquidGlass &&
-        (!isHdrOutputEnabled || liquidGlassInHdr) &&
-        videoSurface?.isTextureSurface == true &&
-        videoSurfaceReady &&
-        videoFrameReady &&
-        glassSource.scene != null
+    if (defaultAudioPlayer) {
+      artworkGlassBackdrop.takeIf { enableLiquidGlass && artworkGlassSource.scene != null }
+    } else {
+      videoBackdrop.takeIf {
+        enableLiquidGlass &&
+          (!isHdrOutputEnabled || liquidGlassInHdr) &&
+          videoSurface?.isTextureSurface == true &&
+          videoSurfaceReady &&
+          videoFrameReady &&
+          glassSource.scene != null
+      }
     }
 
   if (isTelevision) {
@@ -895,7 +933,7 @@ fun PlayerControls(
               .onSizeChanged { playerBounds = it },
         ) {
           if (playerKyantBackdrop != null) {
-            VideoGlassBackdropSource(glassSource, playerKyantBackdrop)
+            VideoGlassBackdropSource(activeGlassSource, playerKyantBackdrop)
           }
           VideoOpenAnimationOverlay(
             style = videoOpenAnim,
@@ -972,14 +1010,9 @@ fun PlayerControls(
             onUpdateDecoder = { PlaybackSession.setPropertyString("hwdec", it.value) },
             speed = playbackSpeed ?: playerPreferences.defaultSpeed.get(),
             onSpeedChange = { PlaybackSession.setPropertyFloat("speed", it.toFixed(2)) },
-            onMakeDefaultSpeed = { playerPreferences.defaultSpeed.set(it.toFixed(2)) },
             onAddSpeedPreset = { playerPreferences.speedPresets += it.toFixed(2).toString() },
             onRemoveSpeedPreset = { playerPreferences.speedPresets -= it.toFixed(2).toString() },
-            onResetSpeedPresets = playerPreferences.speedPresets::delete,
             speedPresets = tvSortedSpeedPresets,
-            onResetDefaultSpeed = {
-              PlaybackSession.setPropertyFloat("speed", playerPreferences.defaultSpeed.deleteAndGet().toFixed(2))
-            },
             onStartSleepTimer = viewModel::startTimer,
             onOpenPanel = onOpenPanel,
             onShowSheet = onOpenSheet,
@@ -1089,7 +1122,7 @@ fun PlayerControls(
           animationState = videoOpenAnimState,
         )
         if (enableLiquidGlass && playerKyantBackdrop != null) {
-          VideoGlassBackdropSource(glassSource, videoBackdrop)
+          VideoGlassBackdropSource(activeGlassSource, playerKyantBackdrop)
         }
         if (brightness < 0) {
           Box(
@@ -2540,14 +2573,9 @@ fun PlayerControls(
           onUpdateDecoder = { PlaybackSession.setPropertyString("hwdec", it.value) },
           speed = playbackSpeed ?: playerPreferences.defaultSpeed.get(),
           onSpeedChange = { PlaybackSession.setPropertyFloat("speed", it.toFixed(2)) },
-          onMakeDefaultSpeed = { playerPreferences.defaultSpeed.set(it.toFixed(2)) },
           onAddSpeedPreset = { playerPreferences.speedPresets += it.toFixed(2).toString() },
           onRemoveSpeedPreset = { playerPreferences.speedPresets -= it.toFixed(2).toString() },
-          onResetSpeedPresets = playerPreferences.speedPresets::delete,
           speedPresets = sortedSpeedPresets,
-          onResetDefaultSpeed = {
-            PlaybackSession.setPropertyFloat("speed", playerPreferences.defaultSpeed.deleteAndGet().toFixed(2))
-          },
           onStartSleepTimer = viewModel::startTimer,
           onOpenPanel = onOpenPanel,
           onShowSheet = onOpenSheet,

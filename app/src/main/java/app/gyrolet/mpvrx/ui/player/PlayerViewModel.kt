@@ -1095,6 +1095,30 @@ class PlayerViewModel(
     val mergeSeparateStreams: Boolean,
   )
 
+  private val _playerPresentation = MutableStateFlow<Boolean?>(null)
+  val playerPresentation: StateFlow<Boolean?> = _playerPresentation.asStateFlow()
+
+  fun setAudioPlayerPresentation(audio: Boolean) {
+    _playerPresentation.value = audio
+    showControls()
+  }
+
+  fun resetPlayerPresentation() {
+    _playerPresentation.value = null
+  }
+
+  private val _defaultAudioLayout = MutableStateFlow<Boolean?>(null)
+
+  /** The layout the current media opens in, as the player controls resolved it; null before that. */
+  val defaultAudioLayout: StateFlow<Boolean?> = _defaultAudioLayout.asStateFlow()
+
+  fun onDefaultPlayerLayoutResolved(audio: Boolean) {
+    _defaultAudioLayout.value = audio
+  }
+
+  /** The music player is on screen (instead of the video player); null before the controls show. */
+  fun audioLayoutShown(): Boolean? = _playerPresentation.value ?: _defaultAudioLayout.value
+
   val isAudioOnly: StateFlow<Boolean> =
     combine(
       allTracks,
@@ -6333,7 +6357,8 @@ class PlayerViewModel(
   fun changeVolumePercentTo(volumePercent: Int) {
     val newPercent = volumePercent.coerceIn(0, 100)
     val newVolume = percentToSystemVolume(newPercent)
-    val flags = if (isAudioOnly.value) AudioManager.FLAG_SHOW_UI else 0
+    // The music player has no volume slider of its own; the video player shows one.
+    val flags = if (audioLayoutShown() ?: isAudioOnly.value) AudioManager.FLAG_SHOW_UI else 0
     (
       appContext.getSystemService(
         Context.AUDIO_SERVICE,
@@ -6355,7 +6380,7 @@ class PlayerViewModel(
     showUi: Boolean = false,
   ) {
     val newVolume = volume.coerceIn(0..maxVolume)
-    val flags = if (showUi || isAudioOnly.value) AudioManager.FLAG_SHOW_UI else 0
+    val flags = if (showUi || (audioLayoutShown() ?: isAudioOnly.value)) AudioManager.FLAG_SHOW_UI else 0
     (
       appContext.getSystemService(
         Context.AUDIO_SERVICE,
@@ -6497,6 +6522,9 @@ class PlayerViewModel(
     viewModelScope.launch(gesturePropertyDispatcher) {
       if (active) {
         if (savedSubtitleBoxStyle != null) return@launch
+        if (MpvConfigOverridePolicy.ownsAny(setOf("sub-border-style", "sub-back-color", "sub-shadow-offset"))) {
+          return@launch
+        }
         val style =
           SubtitleGestureBoxStyle(
             PlaybackSession.getPropertyString("sub-border-style"),

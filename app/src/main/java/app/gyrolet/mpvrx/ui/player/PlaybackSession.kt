@@ -270,6 +270,7 @@ object PlaybackSession : MPVLib.EventObserver {
   /** The current seek's target is already cached; see [seekTargetIsCachedLocked]. */
   @Volatile private var seekWaitsOnlyForDecoder = false
   private const val PLAYBACK_TRANSITION_AUDIO_RESTORE_DELAY_MS = 180L
+  private const val PLAYBACK_TRANSITION_START_HOLD_FAILSAFE_MS = 1500L
   private const val AMBIENT_SHADER_PREFIX = "ambient_"
   private const val AMBIENT_SHADER_SUFFIX = ".glsl"
   private const val STATISTICS_REQUEST_PROPERTY = "user-data/mpvrx/statistics-request"
@@ -469,6 +470,13 @@ object PlaybackSession : MPVLib.EventObserver {
   private var loadedAudiobookEnded = false
   private var speedBeforeAudiobook: Float? = null
   private var attachedOsdOwner: Any? = null
+  private val osdOverlayAttachedState = MutableStateFlow(false)
+
+  /**
+   * FongMi build: mpv draws subtitles, statistics and OSD on the player's own layer above YouTube
+   * Ambient and the album art, instead of into the video Surface underneath them.
+   */
+  internal val osdOverlayAttached: StateFlow<Boolean> = osdOverlayAttachedState.asStateFlow()
   private var appliedDolbyVisionOutput: String? = null
   private var defaultUserAgent: String? = null
   private var pendingPositionRestoreGeneration = 0L
@@ -478,6 +486,7 @@ object PlaybackSession : MPVLib.EventObserver {
   private var playbackTransitionAudioGuardToken = 0L
   private var playbackTransitionAudioGuardPreviousMute: Boolean? = null
   private var playbackTransitionAudioGuardCanRestore = false
+  private var playbackTransitionStartHold = false
   private val activeAmbientShaderPaths = linkedSetOf<String>()
   private var desiredAmbientScaleX = 1.0
   private var desiredAmbientScaleY = 1.0
@@ -846,6 +855,15 @@ object PlaybackSession : MPVLib.EventObserver {
                 // so its low 32 bits must never decide whether the Surface is attached.
                 val windowId = MPVLib.getPropertyString("wid")?.toLongOrNull() ?: 0L
                 if (windowId == 0L || windowId == -1L) return@withLock false
+                // FongMi's direct MediaCodec output fails to start without its OSD Surface. The OSD
+                // layer is a TextureView, which gets its Surface in the same frame's draw pass, just
+                // after a SurfaceView video Surface.
+                if (videoOutput == MediaCodecEmbed.VO &&
+                  DolbyVisionDirect.isBuildSupported &&
+                  attachedOsdOwner == null
+                ) {
+                  return@withLock false
+                }
 
                 val activated =
                   runCatching {
@@ -961,14 +979,16 @@ object PlaybackSession : MPVLib.EventObserver {
     nativeLock.withLock { _state.value.surfaceAttached && attachedSurfaceOwner === owner }
 
   /**
-   * Attaches the transparent overlay that carries subtitles and OSD (FongMi build). Dolby Vision
-   * tracks then go straight to MediaCodec on the video Surface; mpv keeps other tracks on the GPU.
+   * Attaches the transparent layer that carries subtitles, statistics and OSD (FongMi build). mpv
+   * then stops drawing them into the video Surface. With [dolbyVisionDirect], Dolby Vision tracks
+   * go straight to MediaCodec on the video Surface; mpv keeps other tracks on the GPU.
    */
   fun bindOsdSurface(
     surface: Surface,
     width: Int,
     height: Int,
     owner: Any,
+    dolbyVisionDirect: Boolean,
   ): Boolean =
     withCore(default = false) {
       if (!DolbyVisionDirect.isBuildSupported || !surface.isValid || width <= 0 || height <= 0) {
@@ -979,19 +999,30 @@ object PlaybackSession : MPVLib.EventObserver {
         DolbyVisionDirect.attachOsdSurface(surface)
         MPVLib.setPropertyString("android-osd-surface-size", "${width}x$height")
         attachedOsdOwner = owner
-        // Direct output makes FongMi's FFmpeg insist on a native Dolby Vision MediaCodec
-        // decoder and fail the whole video track when the device has none (for example
-        // HDR10-only phones playing profile 8.1 through MediaCodec embed end up with audio
-        // and no picture). Only request it when a DV decoder actually exists; "configured"
-        // keeps the embed output and lets the decoder fall back to the base layer.
-        setDolbyVisionOutputLocked(
-          if (DolbyVisionDirect.hasDolbyVisionDecoder) "direct" else "configured",
-        )
+        osdOverlayAttachedState.value = true
+        setDolbyVisionDirectLocked(dolbyVisionDirect)
       }.onFailure { error ->
-        Log.e(TAG, "Could not attach the subtitle overlay Surface", error)
+        Log.e(TAG, "Could not attach the OSD layer Surface", error)
         detachOsdSurfaceLocked()
       }.isSuccess
     }
+
+  /** Dolby Vision direct output for the attached OSD layer's [owner]. */
+  fun setOsdDolbyVisionDirect(
+    owner: Any,
+    direct: Boolean,
+  ) = withCore(Unit) {
+    if (attachedOsdOwner === owner) setDolbyVisionDirectLocked(direct)
+  }
+
+  private fun setDolbyVisionDirectLocked(direct: Boolean) {
+    // Direct output makes FongMi's FFmpeg insist on a native Dolby Vision MediaCodec decoder
+    // and fail the whole video track when the device has none (for example HDR10-only phones
+    // playing profile 8.1 through MediaCodec embed end up with audio and no picture). Only
+    // request it when a DV decoder actually exists; "configured" keeps the embed output and lets
+    // the decoder fall back to the base layer.
+    setDolbyVisionOutputLocked(if (direct && DolbyVisionDirect.hasDolbyVisionDecoder) "direct" else "configured")
+  }
 
   fun resizeOsdSurface(
     width: Int,
@@ -1033,8 +1064,9 @@ object PlaybackSession : MPVLib.EventObserver {
     // Move a direct Dolby Vision track back to the GPU output before its overlay disappears.
     runCatching { setDolbyVisionOutputLocked("configured") }
     runCatching { DolbyVisionDirect.detachOsdSurface() }
-      .onFailure { error -> Log.w(TAG, "Could not detach the subtitle overlay Surface", error) }
+      .onFailure { error -> Log.w(TAG, "Could not detach the OSD layer Surface", error) }
     attachedOsdOwner = null
+    osdOverlayAttachedState.value = false
   }
 
   private fun setDolbyVisionOutputLocked(output: String) {
@@ -1423,6 +1455,7 @@ object PlaybackSession : MPVLib.EventObserver {
     rendererOutputReady = false
     attachedSurfaceOwner = null
     attachedOsdOwner = null
+    osdOverlayAttachedState.value = false
     appliedDolbyVisionOutput = null
     managesUserScripts = false
     loadedUserScripts.clear()
@@ -2438,7 +2471,7 @@ object PlaybackSession : MPVLib.EventObserver {
 
   internal fun <T> readLoadedPlaybackState(
     mediaIdentifier: String,
-    capture: (positionSeconds: Double, durationSeconds: Double) -> T,
+    capture: (positionSeconds: Double, durationSeconds: Double, item: PlaybackItem) -> T,
   ): T? =
     withReadyCore(null) {
       val current = _state.value
@@ -2453,7 +2486,7 @@ object PlaybackSession : MPVLib.EventObserver {
         MPVLib.getPropertyDouble("time-pos")?.takeIf { it.isFinite() && it >= 0.0 }
           ?: return@withReadyCore null
       val duration = MPVLib.getPropertyDouble("duration")?.takeIf { it.isFinite() && it >= 0.0 } ?: 0.0
-      capture(position, duration)
+      capture(position, duration, item)
     }
 
   internal fun applyAudiobookSpeed(
@@ -3128,7 +3161,17 @@ object PlaybackSession : MPVLib.EventObserver {
             // Track/decoder replacement is now complete. Apply the latest user/service intent
             // once instead of allowing pause writes to race the load operation. Saved-position
             // loads stay paused until PlayerActivity finishes the database lookup and seek.
-            MPVLib.setPropertyBoolean("pause", appliedPaused)
+            // A fresh, audible load stays paused inside mpv until PLAYBACK_RESTART. There the
+            // transition mute is released first and playback starts after, so no audio is flowing
+            // while the mute is lifted.
+            val holdForTransitionMute =
+              !restoringPosition &&
+                !desiredPaused &&
+                playbackTransitionAudioGuardCanRestore &&
+                playbackTransitionAudioGuardPreviousMute != null
+            playbackTransitionStartHold = holdForTransitionMute
+            MPVLib.setPropertyBoolean("pause", appliedPaused || holdForTransitionMute)
+            if (holdForTransitionMute) scheduleTransitionStartHoldFailsafeLocked()
             // A Surface can disappear while loadfile/yt-dlp is still selecting tracks. Keep the
             // new file audio-only until a renderer exists; never reuse the outgoing file's id.
             if (!rendererOutputReady || !current.surfaceAttached) suspendVideoTrackLocked()
@@ -3180,7 +3223,16 @@ object PlaybackSession : MPVLib.EventObserver {
             pendingEofSeekGeneration = null
             applySpatialAudioLocked()
             if (_state.value.phase != PlaybackPhase.STOPPING) {
-              schedulePlaybackTransitionAudioGuardRestoreLocked(PLAYBACK_TRANSITION_AUDIO_RESTORE_DELAY_MS)
+              val releaseHold = playbackTransitionStartHold
+              if (releaseHold ||
+                (playbackTransitionAudioGuardCanRestore && MPVLib.getPropertyBoolean("pause") == true)
+              ) {
+                // mpv is paused here, so no audio is flowing: safe to unmute now, then start.
+                clearPlaybackTransitionAudioGuardLocked(restoreMute = true)
+                if (releaseHold) runCatching { MPVLib.setPropertyBoolean("pause", desiredPaused) }
+              } else {
+                schedulePlaybackTransitionAudioGuardRestoreLocked(PLAYBACK_TRANSITION_AUDIO_RESTORE_DELAY_MS)
+              }
             }
             refreshBufferingState()
             true
@@ -3410,6 +3462,7 @@ object PlaybackSession : MPVLib.EventObserver {
     }
     runCatching { MPVLib.setPropertyBoolean("mute", true) }
     playbackTransitionAudioGuardCanRestore = canRestore
+    playbackTransitionStartHold = false
     playbackTransitionAudioGuardToken++
   }
 
@@ -3431,10 +3484,29 @@ object PlaybackSession : MPVLib.EventObserver {
     val previousMute = playbackTransitionAudioGuardPreviousMute
     playbackTransitionAudioGuardPreviousMute = null
     playbackTransitionAudioGuardCanRestore = false
+    playbackTransitionStartHold = false
     playbackTransitionAudioGuardToken++
     if (restoreMute && initialized && previousMute != null) {
       runCatching { MPVLib.setPropertyBoolean("mute", previousMute) }
     }
+  }
+
+  private fun scheduleTransitionStartHoldFailsafeLocked() {
+    val token = ++playbackTransitionAudioGuardToken
+    playbackTransitionAudioGuardHandler.postDelayed(
+      {
+        nativeLock.withLock {
+          if (!initialized || !playbackTransitionStartHold || token != playbackTransitionAudioGuardToken) {
+            return@withLock
+          }
+          clearPlaybackTransitionAudioGuardLocked(restoreMute = true)
+          if (_state.value.phase != PlaybackPhase.STOPPING) {
+            runCatching { MPVLib.setPropertyBoolean("pause", desiredPaused) }
+          }
+        }
+      },
+      PLAYBACK_TRANSITION_START_HOLD_FAILSAFE_MS,
+    )
   }
 
   internal fun keepYouTubeAmbientSubtitlesInsidePicture(
@@ -3443,7 +3515,6 @@ object PlaybackSession : MPVLib.EventObserver {
   ) = withCore(Unit) {
     val saved = youTubeAmbientSubtitleMargins
     if (active) {
-      if (MpvConfigOverridePolicy.isOwnedByMpvConf("sub-use-margins")) return@withCore
       val original = saved?.second ?: MPVLib.getPropertyString("sub-use-margins") ?: return@withCore
       youTubeAmbientSubtitleMargins = owner to original
       if (saved == null && original != "no") MPVLib.setPropertyString("sub-use-margins", "no")

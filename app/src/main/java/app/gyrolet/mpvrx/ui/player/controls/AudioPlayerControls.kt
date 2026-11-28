@@ -160,6 +160,7 @@ import app.gyrolet.mpvrx.preferences.AudioPreferences
 import app.gyrolet.mpvrx.preferences.AudioVisualizerStyle
 import app.gyrolet.mpvrx.preferences.BrowserPreferences
 import app.gyrolet.mpvrx.preferences.LyricsTranslationDisplayMode
+import app.gyrolet.mpvrx.preferences.PlayerButton
 import app.gyrolet.mpvrx.preferences.PlayerPreferences
 import app.gyrolet.mpvrx.preferences.preference.collectAsState
 import app.gyrolet.mpvrx.presentation.components.AudioFormatArtworkBadge
@@ -174,6 +175,7 @@ import app.gyrolet.mpvrx.ui.icons.Icons
 import app.gyrolet.mpvrx.ui.liquidglass.LocalKyantPlayerBackdrop
 import app.gyrolet.mpvrx.ui.liquidglass.outsideShadow
 import app.gyrolet.mpvrx.ui.player.AudioQuality
+import app.gyrolet.mpvrx.ui.player.DeclaredPlaybackMediaKind
 import app.gyrolet.mpvrx.ui.player.EmbeddedMotionArtwork
 import app.gyrolet.mpvrx.ui.player.InAppMusicSheetState
 import app.gyrolet.mpvrx.ui.player.MotionArtworkImage
@@ -202,6 +204,7 @@ import app.gyrolet.mpvrx.ui.player.controls.components.stableNumericWidth
 import app.gyrolet.mpvrx.ui.player.controls.components.tvFocusHighlight
 import app.gyrolet.mpvrx.ui.player.controls.components.tvInitialFocus
 import app.gyrolet.mpvrx.ui.player.controls.components.withTabularDigits
+import app.gyrolet.mpvrx.ui.player.declaredMediaKind
 import app.gyrolet.mpvrx.ui.player.inAppMusicSheetDrag
 import app.gyrolet.mpvrx.ui.player.playerSheetAnchor
 import app.gyrolet.mpvrx.ui.player.rememberMotionArtworkDrawable
@@ -246,7 +249,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
-private data class AudioPresentationMetadata(
+internal data class AudioPresentationMetadata(
   val artwork: Bitmap?,
   val artist: String?,
   val motionArtwork: ByteArray? = null,
@@ -387,6 +390,13 @@ private object AudioPresentationMetadataCache {
               retriever?.let {
                 EmbeddedArtworkResolver.decodeRetrieverArtwork(it, pictureBytes)
               }
+                ?: if (isLocalArtworkSource(pathOrUri) &&
+                  generator != app.gyrolet.mpvrx.preferences.ThumbnailGenerator.MediaStore
+                ) {
+                  repository.getArtwork(pathOrUri)
+                } else {
+                  null
+                }
             val sidecarArtwork =
               if (embeddedArtwork == null) {
                 EmbeddedArtworkResolver.decodeAudioSidecar(cleanPath ?: pathOrUri)
@@ -413,9 +423,18 @@ private object AudioPresentationMetadataCache {
               motionArtwork = EmbeddedMotionArtwork.animatedBytes(pictureBytes),
               folderMotionArtworkUri = folderMotion,
             )
-          } catch (_: Exception) {
+          } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+          } catch (error: Exception) {
+            app.gyrolet.mpvrx.utils.logging.Log.w("AudioPresentation", "Could not read audio metadata", error)
             val fallbackArtwork =
-              explicitArtwork ?: if (cleanPath != null && !isNetworkStream) {
+              (if (isLocalArtworkSource(pathOrUri) &&
+                generator != app.gyrolet.mpvrx.preferences.ThumbnailGenerator.MediaStore
+              ) {
+                repository.getArtwork(pathOrUri)
+              } else {
+                null
+              }) ?: explicitArtwork ?: if (cleanPath != null && !isNetworkStream) {
                 EmbeddedArtworkResolver.decodeSidecar(cleanPath)
               } else {
                 null
@@ -444,7 +463,7 @@ private object AudioPresentationMetadataCache {
 }
 
 @Composable
-private fun rememberAudioPresentationMetadata(
+internal fun rememberAudioPresentationMetadata(
   pathOrUri: String?,
   artworkUri: String? = null,
 ): AudioPresentationMetadata? {
@@ -469,7 +488,7 @@ private fun rememberAudioPresentationMetadata(
 
 /** FongMi build: decodes the cover mpv parsed from the playing file, once per [key]. */
 @Composable
-private fun rememberMpvAlbumArt(
+internal fun rememberMpvAlbumArt(
   enabled: Boolean,
   key: Any?,
 ): Bitmap? {
@@ -977,6 +996,7 @@ fun AudioPlayerControls(
   onBackPress: () -> Unit,
   onOpenSheet: (Sheets) -> Unit,
   onOpenPanel: (Panels) -> Unit,
+  onSwitchToVideo: () -> Unit,
   modifier: Modifier = Modifier,
   sheetBackdrop: Backdrop? = null,
   inAppSheet: InAppMusicSheetState? = null,
@@ -1006,9 +1026,11 @@ fun AudioPlayerControls(
   val filePosition = viewModel.precisePosition.collectAsStateWithLifecycle()
   val playlistItems by viewModel.playlistItems.collectAsState()
   val isAudioOnly by viewModel.isAudioOnly.collectAsState()
+  val playerPresentation by viewModel.playerPresentation.collectAsState()
+  val switchedToAudio = playerPresentation == true
   val filteredPlaylist =
-    remember(playlistItems, isAudioOnly) {
-      if (isAudioOnly) playlistItems else playlistItems.filter { it.isAudio }
+    remember(playlistItems, isAudioOnly, switchedToAudio) {
+      if (isAudioOnly || switchedToAudio) playlistItems else playlistItems.filter { it.isAudio }
     }
 
   var showInPlaceLyrics by rememberSaveable { mutableStateOf(false) }
@@ -1125,28 +1147,6 @@ fun AudioPlayerControls(
     )
   val embeddedAlbumArt = currentAudioPresentation?.artwork ?: mpvAlbumArt
 
-  fun cleanSongTitle(
-    title: String,
-    artist: String?,
-  ): String {
-    val titleWithoutExt = title.stripAudioExtension()
-    if (!artist.isNullOrBlank() && artist != "Unknown Artist") {
-      val prefixes = listOf("$artist - ", "$artist – ", "$artist — ", "$artist- ", "$artist : ")
-      for (prefix in prefixes) {
-        if (titleWithoutExt.startsWith(prefix, ignoreCase = true)) {
-          return titleWithoutExt.substring(prefix.length).trim()
-        }
-      }
-      val suffixes = listOf(" - $artist", " – $artist", " — $artist", " -$artist")
-      for (suffix in suffixes) {
-        if (titleWithoutExt.endsWith(suffix, ignoreCase = true)) {
-          return titleWithoutExt.substring(0, titleWithoutExt.length - suffix.length).trim()
-        }
-      }
-    }
-    return titleWithoutExt
-  }
-
   val isYouTubeSource = HttpUtils.isYouTubeUrl(currentItem?.originalUri)
   val itemTitle =
     currentItem?.title?.takeIf {
@@ -1204,45 +1204,14 @@ fun AudioPlayerControls(
   val animatedAlbumArtwork by audioPreferences.animatedAlbumArtwork.collectAsState()
   val highQualityArtwork by audioPreferences.highQualityArtwork.collectAsState()
   val artworkQuery =
-    if ((animatedAlbumArtwork || highQualityArtwork) &&
-      !isAudiobook &&
-      (playbackState.phase == PlaybackPhase.READY || playbackState.phase == PlaybackPhase.BACKGROUND)
-    ) {
-      // One metadata observer, only while an online artwork feature is on. Tag names vary in case
-      // across containers; metadata/album is not the by-key lookup, and queue titles may still be raw filenames.
-      val nativeMetadata by PlaybackSession.propNode["metadata"].collectAsState()
-      remember(nativeMetadata, playbackState.generation, currentItem?.title, mediaTitle, displayArtist) {
-        // Use the event as a trigger, then take one generation-checked native snapshot.
-        // A cached metadata event from the previous file must not identify the new song.
-        PlaybackSession.readLoadedMedia(playbackState.generation) { reader ->
-          fun known(value: String?): String? =
-            value?.trim()?.takeUnless {
-              it.isBlank() ||
-                it.equals("<unknown>", ignoreCase = true) ||
-                it.equals("Unknown Artist", ignoreCase = true) ||
-                it.equals("Unknown Album", ignoreCase = true)
-            }
-
-          fun tag(vararg keys: String): String? =
-            keys
-              .asSequence()
-              .mapNotNull { known(reader.string("metadata/by-key/$it")) }
-              .firstOrNull()
-          val artist = tag("artist", "Artist", "ARTIST", "album_artist", "ALBUMARTIST") ?: known(displayArtist)
-          val title =
-            (tag("title", "Title", "TITLE") ?: known(currentItem?.title) ?: known(mediaTitle))
-              ?.let { cleanSongTitle(it, artist) }
-              ?.trim()
-          if (artist != null && !title.isNullOrBlank()) {
-            MotionArtworkQuery(title = title, artist = artist, album = tag("album", "Album", "ALBUM"))
-          } else {
-            null
-          }
-        }
-      }
-    } else {
-      null
-    }
+    rememberArtworkQuery(
+      enabled = (animatedAlbumArtwork || highQualityArtwork) && !isAudiobook,
+      phase = playbackState.phase,
+      generation = playbackState.generation,
+      itemTitle = currentItem?.title,
+      mediaTitle = mediaTitle,
+      artistFallback = displayArtist,
+    )
   val motionQuery = artworkQuery?.takeIf { animatedAlbumArtwork }
   // The catalogue's own cover replaces the embedded one whatever its resolution; until it is
   // cached the embedded art shows, and it stays when no catalogue knows the song.
@@ -2314,7 +2283,7 @@ fun AudioPlayerControls(
                 Modifier
                   .weight(
                     1f,
-                  ).then(if (isPortrait) Modifier.horizontalScroll(rememberScrollState()) else Modifier),
+                  ).horizontalScroll(rememberScrollState()),
               verticalAlignment = Alignment.CenterVertically,
               horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
@@ -2489,6 +2458,17 @@ fun AudioPlayerControls(
               verticalAlignment = Alignment.CenterVertically,
               horizontalArrangement = Arrangement.spacedBy(4.dp),
             ) {
+              ReactiveIconButton(
+                onClick = onSwitchToVideo,
+                modifier = Modifier.size(if (isCompactLandscape) 32.dp else 40.dp),
+              ) {
+                Icon(
+                  imageVector = PlayerButton.SWITCH_PLAYER_LAYOUT.icon,
+                  contentDescription = stringResource(R.string.player_switch_to_video),
+                  tint = MaterialTheme.colorScheme.onSurface,
+                  modifier = Modifier.size(24.dp),
+                )
+              }
               // Favorite Button (right before Add to Playlist)
               ReactiveIconButton(
                 onClick = {
@@ -2501,7 +2481,16 @@ fun AudioPlayerControls(
 
                   coroutineScope.launch {
                     // Toggle local Room favorite state
-                    playlistRepository.toggleFavorite(filePath = path, fileName = displayTitle, isAudio = true)
+                    playlistRepository.toggleFavorite(
+                      filePath = path,
+                      fileName = displayTitle,
+                      isAudio =
+                        when (currentItem?.declaredMediaKind()) {
+                          DeclaredPlaybackMediaKind.AUDIO -> true
+                          DeclaredPlaybackMediaKind.VIDEO -> false
+                          else -> isAudioOnly || !switchedToAudio
+                        },
+                    )
                     actionHaptics.selection(newFavState)
                     // Toggle Jellyfin server favorite status via API if playing from Jellyfin
                     if (server != null && !itemId.isNullOrBlank()) {
@@ -4415,6 +4404,28 @@ private fun RowScope.ExpressiveConnectedBarButton(
   ) {
     content(contentColor)
   }
+}
+
+internal fun cleanSongTitle(
+  title: String,
+  artist: String?,
+): String {
+  val titleWithoutExt = title.stripAudioExtension()
+  if (!artist.isNullOrBlank() && artist != "Unknown Artist") {
+    val prefixes = listOf("$artist - ", "$artist – ", "$artist — ", "$artist- ", "$artist : ")
+    for (prefix in prefixes) {
+      if (titleWithoutExt.startsWith(prefix, ignoreCase = true)) {
+        return titleWithoutExt.substring(prefix.length).trim()
+      }
+    }
+    val suffixes = listOf(" - $artist", " – $artist", " — $artist", " -$artist")
+    for (suffix in suffixes) {
+      if (titleWithoutExt.endsWith(suffix, ignoreCase = true)) {
+        return titleWithoutExt.substring(0, titleWithoutExt.length - suffix.length).trim()
+      }
+    }
+  }
+  return titleWithoutExt
 }
 
 private fun String.stripAudioExtension(): String {
