@@ -58,7 +58,11 @@ fun CastPlayerButton(
       button.performClick()
     }
   }
-  val castState = CastPlaybackController.instance?.castState?.collectAsState()?.value
+  val castState =
+    CastPlaybackController.instance
+      ?.castState
+      ?.collectAsState()
+      ?.value
   Box(modifier = Modifier.size(buttonSize), contentAlignment = Alignment.Center) {
     AdaptiveControlsButton(
       onClick = {

@@ -84,7 +84,10 @@ data class Asset(
 ) {
   val expectedSha256: String?
     get() =
-      (sha256 ?: digest?.takeIf { it.startsWith(SHA256_DIGEST_PREFIX, ignoreCase = true) }?.drop(SHA256_DIGEST_PREFIX.length))
+      (sha256
+        ?: digest
+          ?.takeIf { it.startsWith(SHA256_DIGEST_PREFIX, ignoreCase = true) }
+          ?.drop(SHA256_DIGEST_PREFIX.length))
         ?.trim()
         ?.lowercase()
         ?.takeIf { SHA256_HEX_REGEX.matches(it) }
